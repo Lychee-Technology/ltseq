@@ -213,6 +213,29 @@ RULES = [
         lambda c: c.lk == "special" and c.ck in oracle.EXACT_NUMERIC,
     ),
     Rule(
+        "decimal256_to_float_rounded", BY_MAIN, "#296 (arrow 60)",
+        "a decimal256 cast to Float64 for arithmetic with a float is the nearest double: "
+        "arrow 59 kept the top 64 bits of the unscaled value, so 10**44 was "
+        "9.999999999999999e43",
+        _all(_is(ctx="d256", lk="float"), lambda c: c.pos in grid.ARITHMETIC_POSITIONS),
+    ),
+    Rule(
+        "negative_scale_zero_text", "INTENDED_CHANGE", "#296 (arrow 60)",
+        "a decimal(10, -2) zero cast to a string is \"0\"; arrow 59 wrote \"000\", the digits "
+        "of a zero shifted by the scale. The other values' text is unchanged",
+        lambda c: c.ctx == "dneg" and c.lk == "str" and c.pos in ("ifelse_t", "ifelse_f") and _has_values(c.main),
+        expect=lambda c: _head_values(c, [None if v is None else ("0" if v == "000" else v) for v in c.main["values"]]),
+    ),
+    Rule(
+        "negative_scale_string", "INTENDED_CHANGE", "#296 (B4 of the DataFusion 56 spike; N14)",
+        "a string that would be cast to decimal(10, -2) is refused where the query is built: "
+        "in a comparison, an is_in item, a value unified to the decimal and a shift default. "
+        "DataFusion 56 rounds the string to the scale (\"1\" is 0), where 55 failed at collect "
+        "or main's resolver panicked",
+        _all(_is(ctx="dneg", lk="str"), lambda c: c.pos not in grid.ARITHMETIC_POSITIONS),
+        expect=lambda c: _plan_value_error(c.head, "negative scale"),
+    ),
+    Rule(
         "negative_scale_resolver_panic", "BUG_FIXED", "#242",
         "main's resolver panicked (attempt to multiply with overflow) unifying decimal(10, -2) "
         "with the literal; the literal now reads exactly, and a string in the in-list follows "

@@ -283,7 +283,11 @@ class TransformMixin(LookupMixin, LTSeqLike):
             New LTSeq with filtered rows
 
         Raises:
-            ValueError: If schema not initialized
+            ValueError: If schema not initialized, or if the predicate
+                compares values the planner refuses, such as a string with
+                a decimal of negative scale, which would round it
+                (``r.d == "1"``, or ``r.d == r.s`` for a string column
+                ``s``, on ``decimal128(10, -2)``; #296)
             TypeError: If predicate invalid
             AttributeError: If column not found
 
@@ -379,6 +383,19 @@ class TransformMixin(LookupMixin, LTSeqLike):
 
         Returns:
             New LTSeq with derived columns
+
+        Raises:
+            ValueError: If schema not initialized, or, when ``derive`` is
+                called, if an expression compares or fills a decimal of
+                negative scale with a string, which would round the string
+                to a multiple of that decimal's power of ten (#296): on
+                ``decimal128(10, -2)``, ``r.d == "1"``, ``r.d == r.s`` for
+                a string column ``s``, ``r.d.is_in(["1"])``,
+                ``r.d.fill_null("1")``, ``coalesce(r.d, "1")`` and
+                ``r.d.shift(1, default="1")`` are all refused. Write the value as a ``Decimal`` instead
+                (``r.d.fill_null(Decimal(100))``). A string that the decimal
+                is converted to, as in ``if_else(c, "1", r.d)``, whose
+                result is a string, is kept.
 
         Example:
             >>> t.derive(tax=lambda r: r.price * 0.1)

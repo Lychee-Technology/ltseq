@@ -1,0 +1,575 @@
+{
+ "environment": {
+  "ltseq": "/var/tmp/af296/abl56/py-ltseq/ltseq/__init__.py",
+  "platform": "Linux-7.0.14-30-pve-x86_64-with-glibc2.41",
+  "pyarrow": "25.0.1",
+  "python": "3.13.18"
+ },
+ "label": "56.0.0 stable",
+ "plans": {
+  "sorted float32 (eq|['z(-0.0)', 1.0, 2.5, 7.0] & eq|['z(0.0)', 3.0, 4.0, 5.0])": {
+   "filter_inner": "=== inner logical\nProjection: ?table?.k, ?table?.x, ?table?.c, Float64(-0) AS z_0_0, Float64(0) AS z0_0\n  Filter: (__common_expr_9 IN ([Float64(1), Float64(2.5), Float64(7)]) OR __common_expr_9 >= Float64(0) AND __common_expr_9 <= Float64(0)) AND (__common_expr_9 IN ([Float64(3), Float64(4), Float64(5)]) OR __common_expr_9 >= Float64(0) AND __common_expr_9 <= Float64(0))\n    Projection: CAST(?table?.x AS Float64) AS __common_expr_9, ?table?.k, ?table?.x, ?table?.c\n      TableScan: ?table? projection=[k, x, c]\n=== inner physical\nProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, -0 as z_0_0, 0 as z0_0]\n  FilterExec: (__common_expr_6@0 IN (SET) ([1, 2.5, 7]) OR __common_expr_6@0 >= 0 AND __common_expr_6@0 <= 0) AND (__common_expr_6@0 IN (SET) ([3, 4, 5]) OR __common_expr_6@0 >= 0 AND __common_expr_6@0 <= 0), projection=[k@1, x@2, c@3]\n    ProjectionExec: expr=[CAST(x@1 AS Float64) as __common_expr_6, k@0 as k, x@1 as x, c@2 as c]\n      DataSourceExec: partitions=1, partition_sizes=[1]",
+   "filter_logical": "Projection: ?table?.k, ?table?.x, ?table?.c, ?table?.z_0_0, ?table?.z0_0\n  Sort: __ltseq_hoisted_0 ASC NULLS LAST, __ltseq_hoisted_1 ASC NULLS LAST\n    Projection: ?table?.k, ?table?.x, ?table?.c, ?table?.z_0_0, ?table?.z0_0, ?table?.k AS __ltseq_hoisted_0, ?table?.__ltseq_position_0 AS __ltseq_hoisted_1\n      TableScan: ?table? projection=[k, x, c, z_0_0, z0_0, __ltseq_position_0], full_filters=[CAST(?table?.x AS Float64) = ?table?.z_0_0 OR CAST(?table?.x AS Float64) = Float64(1) OR CAST(?table?.x AS Float64) = Float64(2.5) OR CAST(?table?.x AS Float64) = Float64(7), CAST(?table?.x AS Float64) = ?table?.z0_0 OR CAST(?table?.x AS Float64) = Float64(3) OR CAST(?table?.x AS Float64) = Float64(4) OR CAST(?table?.x AS Float64) = Float64(5)]",
+   "filter_physical": "ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, z_0_0@3 as z_0_0, z0_0@4 as z0_0]\n  SortPreservingMergeExec: [__ltseq_hoisted_0@5 ASC NULLS LAST, __ltseq_hoisted_1@6 ASC NULLS LAST]\n    ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, z_0_0@3 as z_0_0, z0_0@4 as z0_0, k@0 as __ltseq_hoisted_0, __ltseq_position_0@5 as __ltseq_hoisted_1]\n      SortExec: expr=[k@0 ASC NULLS LAST, __ltseq_position_0@5 ASC NULLS LAST], preserve_partitioning=[true]\n        StreamingTableExec: partition_sizes=8, projection=[k, x, c, z_0_0, z0_0, __ltseq_position_0]",
+   "kept": [
+    0,
+    1,
+    6,
+    7
+   ],
+   "kind": "Staged signed zeros, float32 (filter only)",
+   "projection": [
+    true,
+    true,
+    false,
+    null,
+    false,
+    false,
+    true,
+    true,
+    false,
+    false
+   ],
+   "projection_logical": "Projection: ?table?.k, ?table?.x, ?table?.c, ?table?.z_0_0, ?table?.z0_0, p\n  Sort: __ltseq_hoisted_0 ASC NULLS LAST, __ltseq_hoisted_1 ASC NULLS LAST\n    Projection: ?table?.k, ?table?.x, ?table?.c, ?table?.z_0_0, ?table?.z0_0, (?table?.z_0_0 = __common_expr_1 OR __common_expr_1 = Float64(1) OR __common_expr_1 = Float64(2.5) OR __common_expr_1 = Float64(7)) AND (?table?.z0_0 = __common_expr_1 OR __common_expr_1 = Float64(3) OR __common_expr_1 = Float64(4) OR __common_expr_1 = Float64(5)) AS p, __ltseq_hoisted_0 AS __ltseq_hoisted_0, __ltseq_hoisted_1 AS __ltseq_hoisted_1\n      Projection: CAST(?table?.x AS Float64) AS __common_expr_1, ?table?.k, ?table?.x, ?table?.c, ?table?.z_0_0, ?table?.z0_0, ?table?.k AS __ltseq_hoisted_0, ?table?.__ltseq_position_0 AS __ltseq_hoisted_1\n        TableScan: ?table? projection=[k, x, c, z_0_0, z0_0, __ltseq_position_0]",
+   "projection_physical": "ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, z_0_0@3 as z_0_0, z0_0@4 as z0_0, p@5 as p]\n  SortPreservingMergeExec: [__ltseq_hoisted_0@6 ASC NULLS LAST, __ltseq_hoisted_1@7 ASC NULLS LAST]\n    SortExec: expr=[k@0 ASC NULLS LAST, __ltseq_hoisted_1@7 ASC NULLS LAST], preserve_partitioning=[true]\n      ProjectionExec: expr=[k@1 as k, x@2 as x, c@3 as c, z_0_0@4 as z_0_0, z0_0@5 as z0_0, (z_0_0@4 = __common_expr_2@0 OR __common_expr_2@0 = 1 OR __common_expr_2@0 = 2.5 OR __common_expr_2@0 = 7) AND (z0_0@5 = __common_expr_2@0 OR __common_expr_2@0 = 3 OR __common_expr_2@0 = 4 OR __common_expr_2@0 = 5) as p, __ltseq_hoisted_0@6 as __ltseq_hoisted_0, __ltseq_hoisted_1@7 as __ltseq_hoisted_1]\n        ProjectionExec: expr=[CAST(x@1 AS Float64) as __common_expr_2, k@0 as k, x@1 as x, c@2 as c, z_0_0@3 as z_0_0, z0_0@4 as z0_0, k@0 as __ltseq_hoisted_0, __ltseq_position_0@5 as __ltseq_hoisted_1]\n          StreamingTableExec: partition_sizes=8, projection=[k, x, c, z_0_0, z0_0, __ltseq_position_0]",
+   "want": [
+    true,
+    true,
+    false,
+    null,
+    false,
+    false,
+    true,
+    true,
+    false,
+    false
+   ],
+   "want_kept": [
+    0,
+    1,
+    6,
+    7
+   ]
+  },
+  "sorted float64 (eq|['z(-0.0)', 1.0, 2.5, 7.0] & eq|['z(0.0)', 3.0, 4.0, 5.0])": {
+   "filter_inner": "=== inner logical\nProjection: ?table?.k, ?table?.x, ?table?.c, Float64(-0) AS z_0_0, Float64(0) AS z0_0\n  Filter: (?table?.x IN ([Float64(1), Float64(2.5), Float64(7)]) OR ?table?.x >= Float64(0) AND ?table?.x <= Float64(0)) AND (?table?.x IN ([Float64(3), Float64(4), Float64(5)]) OR ?table?.x >= Float64(0) AND ?table?.x <= Float64(0))\n    TableScan: ?table? projection=[k, x, c]\n=== inner physical\nProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, -0 as z_0_0, 0 as z0_0]\n  FilterExec: (x@1 IN (SET) ([1, 2.5, 7]) OR x@1 >= 0 AND x@1 <= 0) AND (x@1 IN (SET) ([3, 4, 5]) OR x@1 >= 0 AND x@1 <= 0)\n    DataSourceExec: partitions=1, partition_sizes=[1]",
+   "filter_logical": "Projection: ?table?.k, ?table?.x, ?table?.c, ?table?.z_0_0, ?table?.z0_0\n  Sort: __ltseq_hoisted_0 ASC NULLS LAST, __ltseq_hoisted_1 ASC NULLS LAST\n    Projection: ?table?.k, ?table?.x, ?table?.c, ?table?.z_0_0, ?table?.z0_0, ?table?.k AS __ltseq_hoisted_0, ?table?.__ltseq_position_0 AS __ltseq_hoisted_1\n      TableScan: ?table? projection=[k, x, c, z_0_0, z0_0, __ltseq_position_0], full_filters=[?table?.z_0_0 = ?table?.x OR ?table?.x = Float64(1) OR ?table?.x = Float64(2.5) OR ?table?.x = Float64(7), ?table?.z0_0 = ?table?.x OR ?table?.x = Float64(3) OR ?table?.x = Float64(4) OR ?table?.x = Float64(5)]",
+   "filter_physical": "ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, z_0_0@3 as z_0_0, z0_0@4 as z0_0]\n  SortPreservingMergeExec: [__ltseq_hoisted_0@5 ASC NULLS LAST, __ltseq_hoisted_1@6 ASC NULLS LAST]\n    ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, z_0_0@3 as z_0_0, z0_0@4 as z0_0, k@0 as __ltseq_hoisted_0, __ltseq_position_0@5 as __ltseq_hoisted_1]\n      SortExec: expr=[k@0 ASC NULLS LAST, __ltseq_position_0@5 ASC NULLS LAST], preserve_partitioning=[true]\n        StreamingTableExec: partition_sizes=8, projection=[k, x, c, z_0_0, z0_0, __ltseq_position_0]",
+   "kept": [
+    0,
+    1,
+    6,
+    7
+   ],
+   "kind": "Staged signed zeros, float64 (filter only)",
+   "projection": [
+    true,
+    true,
+    false,
+    null,
+    false,
+    false,
+    true,
+    true,
+    false,
+    false
+   ],
+   "projection_logical": "Projection: ?table?.k, ?table?.x, ?table?.c, ?table?.z_0_0, ?table?.z0_0, p\n  Sort: __ltseq_hoisted_0 ASC NULLS LAST, __ltseq_hoisted_1 ASC NULLS LAST\n    Projection: ?table?.k, ?table?.x, ?table?.c, ?table?.z_0_0, ?table?.z0_0, (?table?.z_0_0 = ?table?.x OR ?table?.x = Float64(1) OR ?table?.x = Float64(2.5) OR ?table?.x = Float64(7)) AND (?table?.z0_0 = ?table?.x OR ?table?.x = Float64(3) OR ?table?.x = Float64(4) OR ?table?.x = Float64(5)) AS p, ?table?.k AS __ltseq_hoisted_0, ?table?.__ltseq_position_0 AS __ltseq_hoisted_1\n      TableScan: ?table? projection=[k, x, c, z_0_0, z0_0, __ltseq_position_0]",
+   "projection_physical": "ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, z_0_0@3 as z_0_0, z0_0@4 as z0_0, p@5 as p]\n  SortPreservingMergeExec: [__ltseq_hoisted_0@6 ASC NULLS LAST, __ltseq_hoisted_1@7 ASC NULLS LAST]\n    SortExec: expr=[k@0 ASC NULLS LAST, __ltseq_hoisted_1@7 ASC NULLS LAST], preserve_partitioning=[true]\n      ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, z_0_0@3 as z_0_0, z0_0@4 as z0_0, (z_0_0@3 = x@1 OR x@1 = 1 OR x@1 = 2.5 OR x@1 = 7) AND (z0_0@4 = x@1 OR x@1 = 3 OR x@1 = 4 OR x@1 = 5) as p, k@0 as __ltseq_hoisted_0, __ltseq_position_0@5 as __ltseq_hoisted_1]\n        StreamingTableExec: partition_sizes=8, projection=[k, x, c, z_0_0, z0_0, __ltseq_position_0]",
+   "want": [
+    true,
+    true,
+    false,
+    null,
+    false,
+    false,
+    true,
+    true,
+    false,
+    false
+   ],
+   "want_kept": [
+    0,
+    1,
+    6,
+    7
+   ]
+  },
+  "sorted float64 ~(is_in[None, 0.0, 1.0, 2.5] & is_in[-0.0, 3.0, 4.0, 5.0])": {
+   "filter_inner": "=== inner logical\nProjection: ?table?.k, ?table?.x, ?table?.c, Float64(-0) AS z_0_0, Float64(0) AS z0_0\n  Filter: (?table?.x < Float64(-0) OR ?table?.x > Float64(0)) AND ?table?.x NOT IN ([Float64(3), Float64(4), Float64(5)])\n    TableScan: ?table? projection=[k, x, c]\n=== inner physical\nProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, -0 as z_0_0, 0 as z0_0]\n  FilterExec: (x@1 < -0 OR x@1 > 0) AND x@1 NOT IN (SET) ([3, 4, 5])\n    DataSourceExec: partitions=1, partition_sizes=[1]",
+   "filter_logical": "Projection: ?table?.k, ?table?.x, ?table?.c, ?table?.z_0_0, ?table?.z0_0\n  Sort: __ltseq_hoisted_0 ASC NULLS LAST, __ltseq_hoisted_1 ASC NULLS LAST\n    Projection: ?table?.k, ?table?.x, ?table?.c, ?table?.z_0_0, ?table?.z0_0, ?table?.k AS __ltseq_hoisted_0, ?table?.__ltseq_position_0 AS __ltseq_hoisted_1\n      TableScan: ?table? projection=[k, x, c, z_0_0, z0_0, __ltseq_position_0], full_filters=[?table?.x < Float64(-0) OR ?table?.x > Float64(0), ?table?.x NOT IN ([Float64(3), Float64(4), Float64(5)])]",
+   "filter_physical": "ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, z_0_0@3 as z_0_0, z0_0@4 as z0_0]\n  SortPreservingMergeExec: [__ltseq_hoisted_0@5 ASC NULLS LAST, __ltseq_hoisted_1@6 ASC NULLS LAST]\n    ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, z_0_0@3 as z_0_0, z0_0@4 as z0_0, k@0 as __ltseq_hoisted_0, __ltseq_position_0@5 as __ltseq_hoisted_1]\n      SortExec: expr=[k@0 ASC NULLS LAST, __ltseq_position_0@5 ASC NULLS LAST], preserve_partitioning=[true]\n        StreamingTableExec: partition_sizes=8, projection=[k, x, c, z_0_0, z0_0, __ltseq_position_0]",
+   "kept": [
+    2,
+    4,
+    5,
+    8
+   ],
+   "kind": "NULL item and signed zero, float64, negated intersection",
+   "projection": [
+    false,
+    false,
+    true,
+    null,
+    true,
+    true,
+    false,
+    false,
+    true,
+    null
+   ],
+   "projection_logical": "Projection: ?table?.k, ?table?.x, ?table?.c, ?table?.z_0_0, ?table?.z0_0, p\n  Sort: __ltseq_hoisted_0 ASC NULLS LAST, __ltseq_hoisted_1 ASC NULLS LAST\n    Projection: ?table?.k, ?table?.x, ?table?.c, ?table?.z_0_0, ?table?.z0_0, (?table?.x < Float64(-0) OR ?table?.x > Float64(0)) AND (?table?.x NOT IN ([Float64(NULL), Float64(1), Float64(2.5)]) OR ?table?.x NOT IN ([Float64(3), Float64(4), Float64(5)])) AS p, ?table?.k AS __ltseq_hoisted_0, ?table?.__ltseq_position_0 AS __ltseq_hoisted_1\n      TableScan: ?table? projection=[k, x, c, z_0_0, z0_0, __ltseq_position_0]",
+   "projection_physical": "ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, z_0_0@3 as z_0_0, z0_0@4 as z0_0, p@5 as p]\n  SortPreservingMergeExec: [__ltseq_hoisted_0@6 ASC NULLS LAST, __ltseq_hoisted_1@7 ASC NULLS LAST]\n    SortExec: expr=[k@0 ASC NULLS LAST, __ltseq_hoisted_1@7 ASC NULLS LAST], preserve_partitioning=[true]\n      ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, z_0_0@3 as z_0_0, z0_0@4 as z0_0, (x@1 < -0 OR x@1 > 0) AND (x@1 NOT IN (SET) ([NULL, 1, 2.5]) OR x@1 NOT IN (SET) ([3, 4, 5])) as p, k@0 as __ltseq_hoisted_0, __ltseq_position_0@5 as __ltseq_hoisted_1]\n        StreamingTableExec: partition_sizes=8, projection=[k, x, c, z_0_0, z0_0, __ltseq_position_0]",
+   "want": [
+    false,
+    false,
+    true,
+    null,
+    true,
+    true,
+    false,
+    false,
+    true,
+    null
+   ],
+   "want_kept": [
+    2,
+    4,
+    5,
+    8
+   ]
+  },
+  "sorted int64 (eq|['z(1)', 2, 10, 11] & ~is_in[None, 3, 4, 6])": {
+   "filter_inner": null,
+   "filter_logical": "EmptyRelation: rows=0",
+   "filter_physical": "EmptyExec",
+   "kept": [],
+   "kind": "Staged Int64 item and NULL item (filter only)",
+   "projection": [
+    null,
+    null,
+    null,
+    false,
+    false,
+    false,
+    false,
+    false
+   ],
+   "projection_logical": "Projection: ?table?.k, ?table?.x, ?table?.c, ?table?.z1, p\n  Sort: __ltseq_hoisted_0 ASC NULLS LAST, __ltseq_hoisted_1 ASC NULLS LAST\n    Projection: ?table?.k, ?table?.x, ?table?.c, ?table?.z1, (?table?.z1 = ?table?.x OR ?table?.x = Int64(2) OR ?table?.x = Int64(10) OR ?table?.x = Int64(11)) AND ?table?.x NOT IN ([Int64(NULL), Int64(3), Int64(4), Int64(6)]) AS p, ?table?.k AS __ltseq_hoisted_0, ?table?.__ltseq_position_0 AS __ltseq_hoisted_1\n      TableScan: ?table? projection=[k, x, c, z1, __ltseq_position_0]",
+   "projection_physical": "ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, z1@3 as z1, p@4 as p]\n  SortPreservingMergeExec: [__ltseq_hoisted_0@5 ASC NULLS LAST, __ltseq_hoisted_1@6 ASC NULLS LAST]\n    SortExec: expr=[k@0 ASC NULLS LAST, __ltseq_hoisted_1@6 ASC NULLS LAST], preserve_partitioning=[true]\n      ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, z1@3 as z1, (z1@3 = x@1 OR x@1 = 2 OR x@1 = 10 OR x@1 = 11) AND x@1 NOT IN (SET) ([NULL, 3, 4, 6]) as p, k@0 as __ltseq_hoisted_0, __ltseq_position_0@4 as __ltseq_hoisted_1]\n        StreamingTableExec: partition_sizes=8, projection=[k, x, c, z1, __ltseq_position_0]",
+   "want": [
+    null,
+    null,
+    null,
+    false,
+    false,
+    false,
+    false,
+    false
+   ],
+   "want_kept": []
+  },
+  "sorted int64 (eq|[1, 2, 5, 9] & is_in[None, 3, 4, 6])": {
+   "filter_inner": "=== inner logical\nEmptyRelation: rows=0\n=== inner physical\nEmptyExec",
+   "filter_logical": "Projection: ?table?.k, ?table?.x, ?table?.c, ?table?.z1\n  Sort: __ltseq_hoisted_0 ASC NULLS LAST, __ltseq_hoisted_1 ASC NULLS LAST\n    Projection: ?table?.k, ?table?.x, ?table?.c, ?table?.z1, ?table?.k AS __ltseq_hoisted_0, ?table?.__ltseq_position_0 AS __ltseq_hoisted_1\n      TableScan: ?table? projection=[k, x, c, z1, __ltseq_position_0], full_filters=[?table?.x IN ([Int64(1), Int64(2), Int64(5), Int64(9)]), ?table?.x IN ([Int64(3), Int64(4), Int64(6)])]",
+   "filter_physical": "ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, z1@3 as z1]\n  SortPreservingMergeExec: [__ltseq_hoisted_0@4 ASC NULLS LAST, __ltseq_hoisted_1@5 ASC NULLS LAST]\n    ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, z1@3 as z1, k@0 as __ltseq_hoisted_0, __ltseq_position_0@4 as __ltseq_hoisted_1]\n      SortExec: expr=[k@0 ASC NULLS LAST, __ltseq_position_0@4 ASC NULLS LAST], preserve_partitioning=[true]\n        StreamingTableExec: partition_sizes=8, projection=[k, x, c, z1, __ltseq_position_0]",
+   "kept": [],
+   "kind": "NULL item, Int64, intersection (projection only)",
+   "projection": [
+    null,
+    null,
+    null,
+    null,
+    false,
+    false,
+    false,
+    null
+   ],
+   "projection_logical": "Projection: ?table?.k, ?table?.x, ?table?.c, ?table?.z1, p\n  Sort: __ltseq_hoisted_0 ASC NULLS LAST, __ltseq_hoisted_1 ASC NULLS LAST\n    Projection: ?table?.k, ?table?.x, ?table?.c, ?table?.z1, ?table?.x IN ([Int64(1), Int64(2), Int64(5), Int64(9)]) AND ?table?.x IN ([Int64(NULL), Int64(3), Int64(4), Int64(6)]) AS p, ?table?.k AS __ltseq_hoisted_0, ?table?.__ltseq_position_0 AS __ltseq_hoisted_1\n      TableScan: ?table? projection=[k, x, c, z1, __ltseq_position_0]",
+   "projection_physical": "ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, z1@3 as z1, p@4 as p]\n  SortPreservingMergeExec: [__ltseq_hoisted_0@5 ASC NULLS LAST, __ltseq_hoisted_1@6 ASC NULLS LAST]\n    SortExec: expr=[k@0 ASC NULLS LAST, __ltseq_hoisted_1@6 ASC NULLS LAST], preserve_partitioning=[true]\n      ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, z1@3 as z1, x@1 IN (SET) ([1, 2, 5, 9]) AND x@1 IN (SET) ([NULL, 3, 4, 6]) as p, k@0 as __ltseq_hoisted_0, __ltseq_position_0@4 as __ltseq_hoisted_1]\n        StreamingTableExec: partition_sizes=8, projection=[k, x, c, z1, __ltseq_position_0]",
+   "want": [
+    null,
+    null,
+    null,
+    null,
+    false,
+    false,
+    false,
+    null
+   ],
+   "want_kept": []
+  },
+  "sorted int64 (is_in[1, 2, 5] & ~is_in[None, 3, 4, 6])": {
+   "filter_inner": "=== inner logical\nEmptyRelation: rows=0\n=== inner physical\nEmptyExec",
+   "filter_logical": "Projection: ?table?.k, ?table?.x, ?table?.c, ?table?.z1\n  Sort: __ltseq_hoisted_0 ASC NULLS LAST, __ltseq_hoisted_1 ASC NULLS LAST\n    Projection: ?table?.k, ?table?.x, ?table?.c, ?table?.z1, ?table?.k AS __ltseq_hoisted_0, ?table?.__ltseq_position_0 AS __ltseq_hoisted_1\n      TableScan: ?table? projection=[k, x, c, z1, __ltseq_position_0], full_filters=[?table?.x IN ([Int64(1), Int64(2), Int64(5)]), Boolean(NULL)]",
+   "filter_physical": "ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, z1@3 as z1]\n  SortPreservingMergeExec: [__ltseq_hoisted_0@4 ASC NULLS LAST, __ltseq_hoisted_1@5 ASC NULLS LAST]\n    ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, z1@3 as z1, k@0 as __ltseq_hoisted_0, __ltseq_position_0@4 as __ltseq_hoisted_1]\n      SortExec: expr=[k@0 ASC NULLS LAST, __ltseq_position_0@4 ASC NULLS LAST], preserve_partitioning=[true]\n        StreamingTableExec: partition_sizes=8, projection=[k, x, c, z1, __ltseq_position_0]",
+   "kept": [],
+   "kind": "NULL item, Int64, IN minus NOT IN",
+   "projection": [
+    null,
+    null,
+    null,
+    null,
+    false,
+    false,
+    false,
+    false
+   ],
+   "projection_logical": "Projection: ?table?.k, ?table?.x, ?table?.c, ?table?.z1, p\n  Sort: __ltseq_hoisted_0 ASC NULLS LAST, __ltseq_hoisted_1 ASC NULLS LAST\n    Projection: ?table?.k, ?table?.x, ?table?.c, ?table?.z1, ?table?.x IN ([Int64(1), Int64(2), Int64(5)]) AND ?table?.x NOT IN ([Int64(NULL), Int64(3), Int64(4), Int64(6)]) AS p, ?table?.k AS __ltseq_hoisted_0, ?table?.__ltseq_position_0 AS __ltseq_hoisted_1\n      TableScan: ?table? projection=[k, x, c, z1, __ltseq_position_0]",
+   "projection_physical": "ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, z1@3 as z1, p@4 as p]\n  SortPreservingMergeExec: [__ltseq_hoisted_0@5 ASC NULLS LAST, __ltseq_hoisted_1@6 ASC NULLS LAST]\n    SortExec: expr=[k@0 ASC NULLS LAST, __ltseq_hoisted_1@6 ASC NULLS LAST], preserve_partitioning=[true]\n      ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, z1@3 as z1, x@1 IN (SET) ([1, 2, 5]) AND x@1 NOT IN (SET) ([NULL, 3, 4, 6]) as p, k@0 as __ltseq_hoisted_0, __ltseq_position_0@4 as __ltseq_hoisted_1]\n        StreamingTableExec: partition_sizes=8, projection=[k, x, c, z1, __ltseq_position_0]",
+   "want": [
+    null,
+    null,
+    null,
+    null,
+    false,
+    false,
+    false,
+    false
+   ],
+   "want_kept": []
+  },
+  "sorted int64 dictionary (is_in[1, 2, 5] & ~is_in[None, 3, 4, 6])": {
+   "filter_inner": null,
+   "filter_logical": "EmptyRelation: rows=0",
+   "filter_physical": "EmptyExec",
+   "kept": [],
+   "kind": "NULL item, dictionary Int64, IN minus NOT IN",
+   "projection": [
+    null,
+    null,
+    null,
+    null,
+    false,
+    false,
+    false,
+    false
+   ],
+   "projection_logical": "Projection: ?table?.k, ?table?.x, ?table?.c, ?table?.z1, p\n  Sort: __ltseq_hoisted_0 ASC NULLS LAST, __ltseq_hoisted_1 ASC NULLS LAST\n    Projection: ?table?.k, ?table?.x, ?table?.c, ?table?.z1, (?table?.x = Dictionary(Int32, Int64(1)) OR ?table?.x = Dictionary(Int32, Int64(2)) OR ?table?.x = Dictionary(Int32, Int64(5))) AND ?table?.x NOT IN ([Dictionary(Int32, Int64(NULL)), Dictionary(Int32, Int64(3)), Dictionary(Int32, Int64(4)), Dictionary(Int32, Int64(6))]) AS p, ?table?.k AS __ltseq_hoisted_0, ?table?.__ltseq_position_0 AS __ltseq_hoisted_1\n      TableScan: ?table? projection=[k, x, c, z1, __ltseq_position_0]",
+   "projection_physical": "ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, z1@3 as z1, p@4 as p]\n  SortPreservingMergeExec: [__ltseq_hoisted_0@5 ASC NULLS LAST, __ltseq_hoisted_1@6 ASC NULLS LAST]\n    SortExec: expr=[k@0 ASC NULLS LAST, __ltseq_hoisted_1@6 ASC NULLS LAST], preserve_partitioning=[true]\n      ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, z1@3 as z1, (x@1 = 1 OR x@1 = 2 OR x@1 = 5) AND x@1 NOT IN (SET) ([NULL, 3, 4, 6]) as p, k@0 as __ltseq_hoisted_0, __ltseq_position_0@4 as __ltseq_hoisted_1]\n        StreamingTableExec: partition_sizes=8, projection=[k, x, c, z1, __ltseq_position_0]",
+   "want": [
+    null,
+    null,
+    null,
+    null,
+    false,
+    false,
+    false,
+    false
+   ],
+   "want_kept": []
+  },
+  "sorted string (is_in['s1', 's2', 's5'] & ~is_in[None, 's3', 's4', 's6'])": {
+   "filter_inner": null,
+   "filter_logical": "EmptyRelation: rows=0",
+   "filter_physical": "EmptyExec",
+   "kept": [],
+   "kind": "NULL item, string, IN minus NOT IN",
+   "projection": [
+    null,
+    null,
+    null,
+    null,
+    false,
+    false,
+    false,
+    false
+   ],
+   "projection_logical": "Projection: ?table?.k, ?table?.x, ?table?.c, ?table?.z_s1_, p\n  Sort: __ltseq_hoisted_0 ASC NULLS LAST, __ltseq_hoisted_1 ASC NULLS LAST\n    Projection: ?table?.k, ?table?.x, ?table?.c, ?table?.z_s1_, (?table?.x = Utf8(\"s1\") OR ?table?.x = Utf8(\"s2\") OR ?table?.x = Utf8(\"s5\")) AND ?table?.x NOT IN ([Utf8(NULL), Utf8(\"s3\"), Utf8(\"s4\"), Utf8(\"s6\")]) AS p, ?table?.k AS __ltseq_hoisted_0, ?table?.__ltseq_position_0 AS __ltseq_hoisted_1\n      TableScan: ?table? projection=[k, x, c, z_s1_, __ltseq_position_0]",
+   "projection_physical": "ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, z_s1_@3 as z_s1_, p@4 as p]\n  SortPreservingMergeExec: [__ltseq_hoisted_0@5 ASC NULLS LAST, __ltseq_hoisted_1@6 ASC NULLS LAST]\n    SortExec: expr=[k@0 ASC NULLS LAST, __ltseq_hoisted_1@6 ASC NULLS LAST], preserve_partitioning=[true]\n      ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, z_s1_@3 as z_s1_, (x@1 = s1 OR x@1 = s2 OR x@1 = s5) AND x@1 NOT IN (SET) ([NULL, s3, s4, s6]) as p, k@0 as __ltseq_hoisted_0, __ltseq_position_0@4 as __ltseq_hoisted_1]\n        StreamingTableExec: partition_sizes=8, projection=[k, x, c, z_s1_, __ltseq_position_0]",
+   "want": [
+    null,
+    null,
+    null,
+    null,
+    false,
+    false,
+    false,
+    false
+   ],
+   "want_kept": []
+  },
+  "unsorted float32 (eq|['z(-0.0)', 1.0, 2.5, 7.0] & eq|['z(0.0)', 3.0, 4.0, 5.0])": {
+   "filter_inner": null,
+   "filter_logical": "Projection: ?table?.k, ?table?.x, ?table?.c, Float64(-0) AS z_0_0, Float64(0) AS z0_0\n  Filter: (__common_expr_5 IN ([Float64(1), Float64(2.5), Float64(7)]) OR __common_expr_5 >= Float64(0) AND __common_expr_5 <= Float64(0)) AND (__common_expr_5 IN ([Float64(3), Float64(4), Float64(5)]) OR __common_expr_5 >= Float64(0) AND __common_expr_5 <= Float64(0))\n    Projection: CAST(?table?.x AS Float64) AS __common_expr_5, ?table?.k, ?table?.x, ?table?.c\n      TableScan: ?table? projection=[k, x, c]",
+   "filter_physical": "ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, -0 as z_0_0, 0 as z0_0]\n  FilterExec: (__common_expr_8@0 IN (SET) ([1, 2.5, 7]) OR __common_expr_8@0 >= 0 AND __common_expr_8@0 <= 0) AND (__common_expr_8@0 IN (SET) ([3, 4, 5]) OR __common_expr_8@0 >= 0 AND __common_expr_8@0 <= 0), projection=[k@1, x@2, c@3]\n    ProjectionExec: expr=[CAST(x@1 AS Float64) as __common_expr_8, k@0 as k, x@1 as x, c@2 as c]\n      DataSourceExec: partitions=1, partition_sizes=[1]",
+   "kept": [
+    0,
+    1,
+    6,
+    7
+   ],
+   "kind": "Staged signed zeros, float32 (filter only)",
+   "projection": [
+    true,
+    true,
+    false,
+    null,
+    false,
+    false,
+    true,
+    true,
+    false,
+    false
+   ],
+   "projection_logical": "Projection: ?table?.k, ?table?.x, ?table?.c, z_0_0, z0_0, (z_0_0 = __common_expr_1 OR __common_expr_1 = Float64(1) OR __common_expr_1 = Float64(2.5) OR __common_expr_1 = Float64(7)) AND (z0_0 = __common_expr_1 OR __common_expr_1 = Float64(3) OR __common_expr_1 = Float64(4) OR __common_expr_1 = Float64(5)) AS p\n  Projection: CAST(?table?.x AS Float64) AS __common_expr_1, ?table?.k, ?table?.x, ?table?.c, Float64(-0) AS z_0_0, Float64(0) AS z0_0\n    TableScan: ?table? projection=[k, x, c]",
+   "projection_physical": "ProjectionExec: expr=[k@1 as k, x@2 as x, c@3 as c, z_0_0@4 as z_0_0, z0_0@5 as z0_0, (z_0_0@4 = __common_expr_2@0 OR __common_expr_2@0 = 1 OR __common_expr_2@0 = 2.5 OR __common_expr_2@0 = 7) AND (z0_0@5 = __common_expr_2@0 OR __common_expr_2@0 = 3 OR __common_expr_2@0 = 4 OR __common_expr_2@0 = 5) as p]\n  ProjectionExec: expr=[CAST(x@1 AS Float64) as __common_expr_2, k@0 as k, x@1 as x, c@2 as c, -0 as z_0_0, 0 as z0_0]\n    DataSourceExec: partitions=1, partition_sizes=[1]",
+   "want": [
+    true,
+    true,
+    false,
+    null,
+    false,
+    false,
+    true,
+    true,
+    false,
+    false
+   ],
+   "want_kept": [
+    0,
+    1,
+    6,
+    7
+   ]
+  },
+  "unsorted float64 (eq|['z(-0.0)', 1.0, 2.5, 7.0] & eq|['z(0.0)', 3.0, 4.0, 5.0])": {
+   "filter_inner": null,
+   "filter_logical": "Projection: ?table?.k, ?table?.x, ?table?.c, Float64(-0) AS z_0_0, Float64(0) AS z0_0\n  Filter: (?table?.x IN ([Float64(1), Float64(2.5), Float64(7)]) OR ?table?.x >= Float64(0) AND ?table?.x <= Float64(0)) AND (?table?.x IN ([Float64(3), Float64(4), Float64(5)]) OR ?table?.x >= Float64(0) AND ?table?.x <= Float64(0))\n    TableScan: ?table? projection=[k, x, c]",
+   "filter_physical": "ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, -0 as z_0_0, 0 as z0_0]\n  FilterExec: (x@1 IN (SET) ([1, 2.5, 7]) OR x@1 >= 0 AND x@1 <= 0) AND (x@1 IN (SET) ([3, 4, 5]) OR x@1 >= 0 AND x@1 <= 0)\n    DataSourceExec: partitions=1, partition_sizes=[1]",
+   "kept": [
+    0,
+    1,
+    6,
+    7
+   ],
+   "kind": "Staged signed zeros, float64 (filter only)",
+   "projection": [
+    true,
+    true,
+    false,
+    null,
+    false,
+    false,
+    true,
+    true,
+    false,
+    false
+   ],
+   "projection_logical": "Projection: ?table?.k, ?table?.x, ?table?.c, z_0_0, z0_0, (?table?.x = z_0_0 OR ?table?.x = Float64(1) OR ?table?.x = Float64(2.5) OR ?table?.x = Float64(7)) AND (?table?.x = z0_0 OR ?table?.x = Float64(3) OR ?table?.x = Float64(4) OR ?table?.x = Float64(5)) AS p\n  Projection: ?table?.k, ?table?.x, ?table?.c, Float64(-0) AS z_0_0, Float64(0) AS z0_0\n    TableScan: ?table? projection=[k, x, c]",
+   "projection_physical": "ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, z_0_0@3 as z_0_0, z0_0@4 as z0_0, (x@1 = z_0_0@3 OR x@1 = 1 OR x@1 = 2.5 OR x@1 = 7) AND (x@1 = z0_0@4 OR x@1 = 3 OR x@1 = 4 OR x@1 = 5) as p]\n  ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, -0 as z_0_0, 0 as z0_0]\n    DataSourceExec: partitions=1, partition_sizes=[1]",
+   "want": [
+    true,
+    true,
+    false,
+    null,
+    false,
+    false,
+    true,
+    true,
+    false,
+    false
+   ],
+   "want_kept": [
+    0,
+    1,
+    6,
+    7
+   ]
+  },
+  "unsorted float64 ~(is_in[None, 0.0, 1.0, 2.5] & is_in[-0.0, 3.0, 4.0, 5.0])": {
+   "filter_inner": null,
+   "filter_logical": "Projection: ?table?.k, ?table?.x, ?table?.c, Float64(-0) AS z_0_0, Float64(0) AS z0_0\n  Filter: (?table?.x < Float64(-0) OR ?table?.x > Float64(0)) AND ?table?.x NOT IN ([Float64(3), Float64(4), Float64(5)])\n    TableScan: ?table? projection=[k, x, c]",
+   "filter_physical": "ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, -0 as z_0_0, 0 as z0_0]\n  FilterExec: (x@1 < -0 OR x@1 > 0) AND x@1 NOT IN (SET) ([3, 4, 5])\n    DataSourceExec: partitions=1, partition_sizes=[1]",
+   "kept": [
+    2,
+    4,
+    5,
+    8
+   ],
+   "kind": "NULL item and signed zero, float64, negated intersection",
+   "projection": [
+    false,
+    false,
+    true,
+    null,
+    true,
+    true,
+    false,
+    false,
+    true,
+    null
+   ],
+   "projection_logical": "Projection: ?table?.k, ?table?.x, ?table?.c, Float64(-0) AS z_0_0, Float64(0) AS z0_0, (?table?.x < Float64(-0) OR ?table?.x > Float64(0)) AND (?table?.x NOT IN ([Float64(NULL), Float64(1), Float64(2.5)]) OR ?table?.x NOT IN ([Float64(3), Float64(4), Float64(5)])) AS p\n  TableScan: ?table? projection=[k, x, c]",
+   "projection_physical": "ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, -0 as z_0_0, 0 as z0_0, (x@1 < -0 OR x@1 > 0) AND (x@1 NOT IN (SET) ([NULL, 1, 2.5]) OR x@1 NOT IN (SET) ([3, 4, 5])) as p]\n  DataSourceExec: partitions=1, partition_sizes=[1]",
+   "want": [
+    false,
+    false,
+    true,
+    null,
+    true,
+    true,
+    false,
+    false,
+    true,
+    null
+   ],
+   "want_kept": [
+    2,
+    4,
+    5,
+    8
+   ]
+  },
+  "unsorted int64 (eq|['z(1)', 2, 10, 11] & ~is_in[None, 3, 4, 6])": {
+   "filter_inner": null,
+   "filter_logical": "EmptyRelation: rows=0",
+   "filter_physical": "EmptyExec",
+   "kept": [],
+   "kind": "Staged Int64 item and NULL item (filter only)",
+   "projection": [
+    null,
+    null,
+    null,
+    false,
+    false,
+    false,
+    false,
+    false
+   ],
+   "projection_logical": "Projection: ?table?.k, ?table?.x, ?table?.c, z1, (?table?.x = z1 OR ?table?.x = Int64(2) OR ?table?.x = Int64(10) OR ?table?.x = Int64(11)) AND ?table?.x NOT IN ([Int64(NULL), Int64(3), Int64(4), Int64(6)]) AS p\n  Projection: ?table?.k, ?table?.x, ?table?.c, Int64(1) AS z1\n    TableScan: ?table? projection=[k, x, c]",
+   "projection_physical": "ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, z1@3 as z1, (x@1 = z1@3 OR x@1 = 2 OR x@1 = 10 OR x@1 = 11) AND x@1 NOT IN (SET) ([NULL, 3, 4, 6]) as p]\n  ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, 1 as z1]\n    DataSourceExec: partitions=1, partition_sizes=[1]",
+   "want": [
+    null,
+    null,
+    null,
+    false,
+    false,
+    false,
+    false,
+    false
+   ],
+   "want_kept": []
+  },
+  "unsorted int64 (eq|[1, 2, 5, 9] & is_in[None, 3, 4, 6])": {
+   "filter_inner": null,
+   "filter_logical": "EmptyRelation: rows=0",
+   "filter_physical": "EmptyExec",
+   "kept": [],
+   "kind": "NULL item, Int64, intersection (projection only)",
+   "projection": [
+    null,
+    null,
+    null,
+    null,
+    false,
+    false,
+    false,
+    null
+   ],
+   "projection_logical": "Projection: ?table?.k, ?table?.x, ?table?.c, Int64(1) AS z1, ?table?.x IN ([Int64(1), Int64(2), Int64(5), Int64(9)]) AND ?table?.x IN ([Int64(NULL), Int64(3), Int64(4), Int64(6)]) AS p\n  TableScan: ?table? projection=[k, x, c]",
+   "projection_physical": "ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, 1 as z1, x@1 IN (SET) ([1, 2, 5, 9]) AND x@1 IN (SET) ([NULL, 3, 4, 6]) as p]\n  DataSourceExec: partitions=1, partition_sizes=[1]",
+   "want": [
+    null,
+    null,
+    null,
+    null,
+    false,
+    false,
+    false,
+    null
+   ],
+   "want_kept": []
+  },
+  "unsorted int64 (is_in[1, 2, 5] & ~is_in[None, 3, 4, 6])": {
+   "filter_inner": null,
+   "filter_logical": "Projection: ?table?.k, ?table?.x, ?table?.c, Int64(1) AS z1\n  Filter: ?table?.x IN ([Int64(1), Int64(2), Int64(5)]) AND Boolean(NULL)\n    TableScan: ?table? projection=[k, x, c]",
+   "filter_physical": "ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, 1 as z1]\n  FilterExec: x@1 IN (SET) ([1, 2, 5]) AND NULL\n    DataSourceExec: partitions=1, partition_sizes=[1]",
+   "kept": [],
+   "kind": "NULL item, Int64, IN minus NOT IN",
+   "projection": [
+    null,
+    null,
+    null,
+    null,
+    false,
+    false,
+    false,
+    false
+   ],
+   "projection_logical": "Projection: ?table?.k, ?table?.x, ?table?.c, Int64(1) AS z1, ?table?.x IN ([Int64(1), Int64(2), Int64(5)]) AND ?table?.x NOT IN ([Int64(NULL), Int64(3), Int64(4), Int64(6)]) AS p\n  TableScan: ?table? projection=[k, x, c]",
+   "projection_physical": "ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, 1 as z1, x@1 IN (SET) ([1, 2, 5]) AND x@1 NOT IN (SET) ([NULL, 3, 4, 6]) as p]\n  DataSourceExec: partitions=1, partition_sizes=[1]",
+   "want": [
+    null,
+    null,
+    null,
+    null,
+    false,
+    false,
+    false,
+    false
+   ],
+   "want_kept": []
+  },
+  "unsorted int64 dictionary (is_in[1, 2, 5] & ~is_in[None, 3, 4, 6])": {
+   "filter_inner": null,
+   "filter_logical": "EmptyRelation: rows=0",
+   "filter_physical": "EmptyExec",
+   "kept": [],
+   "kind": "NULL item, dictionary Int64, IN minus NOT IN",
+   "projection": [
+    null,
+    null,
+    null,
+    null,
+    false,
+    false,
+    false,
+    false
+   ],
+   "projection_logical": "Projection: ?table?.k, ?table?.x, ?table?.c, Int64(1) AS z1, (?table?.x = Dictionary(Int32, Int64(1)) OR ?table?.x = Dictionary(Int32, Int64(2)) OR ?table?.x = Dictionary(Int32, Int64(5))) AND ?table?.x NOT IN ([Dictionary(Int32, Int64(NULL)), Dictionary(Int32, Int64(3)), Dictionary(Int32, Int64(4)), Dictionary(Int32, Int64(6))]) AS p\n  TableScan: ?table? projection=[k, x, c]",
+   "projection_physical": "ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, 1 as z1, (x@1 = 1 OR x@1 = 2 OR x@1 = 5) AND x@1 NOT IN (SET) ([NULL, 3, 4, 6]) as p]\n  DataSourceExec: partitions=1, partition_sizes=[1]",
+   "want": [
+    null,
+    null,
+    null,
+    null,
+    false,
+    false,
+    false,
+    false
+   ],
+   "want_kept": []
+  },
+  "unsorted string (is_in['s1', 's2', 's5'] & ~is_in[None, 's3', 's4', 's6'])": {
+   "filter_inner": null,
+   "filter_logical": "EmptyRelation: rows=0",
+   "filter_physical": "EmptyExec",
+   "kept": [],
+   "kind": "NULL item, string, IN minus NOT IN",
+   "projection": [
+    null,
+    null,
+    null,
+    null,
+    false,
+    false,
+    false,
+    false
+   ],
+   "projection_logical": "Projection: ?table?.k, ?table?.x, ?table?.c, Utf8(\"s1\") AS z_s1_, (?table?.x = Utf8(\"s1\") OR ?table?.x = Utf8(\"s2\") OR ?table?.x = Utf8(\"s5\")) AND ?table?.x NOT IN ([Utf8(NULL), Utf8(\"s3\"), Utf8(\"s4\"), Utf8(\"s6\")]) AS p\n  TableScan: ?table? projection=[k, x, c]",
+   "projection_physical": "ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, s1 as z_s1_, (x@1 = s1 OR x@1 = s2 OR x@1 = s5) AND x@1 NOT IN (SET) ([NULL, s3, s4, s6]) as p]\n  DataSourceExec: partitions=1, partition_sizes=[1]",
+   "want": [
+    null,
+    null,
+    null,
+    null,
+    false,
+    false,
+    false,
+    false
+   ],
+   "want_kept": []
+  }
+ }
+}

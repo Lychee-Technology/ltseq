@@ -229,6 +229,16 @@ def test_deep_expressions_on_a_small_thread(stack_kib):
 # and `explain_plan` a 2 MiB one) after `derive` had accepted the
 # expression. DEEP crashed them in a debug build; a release build needs
 # more levels to crash, which `LTSEQ_DEPTH_TEST_LEVELS` sets.
+#
+# `distinct` runs at DISTINCT_DEEP levels (#296). DataFusion 56 plans a
+# sort or grouping over a column computed by a deep expression in time that
+# grows about as the cube of its depth, where 55 grew about linearly: on a
+# debug build, plain DataFusion 56 builds a `SortExec` over a 100-level
+# projection in 0.67 s (0.08 s at 50 levels), and this test's sorted
+# `distinct` took 88 s at 200 levels against 0.44 s on 55, so at DEEP it
+# outran the subprocess timeout. The cost is in the sort's equivalence
+# properties (`extract_common_sort_prefix`, `reorder`), not in LTSeq.
+DISTINCT_DEEP = 100
 DOWNSTREAM = textwrap.dedent(
     """
     import sys
@@ -239,14 +249,23 @@ DOWNSTREAM = textwrap.dedent(
 
     sys.setrecursionlimit(20_000)
     depth = {depth}
+    distinct_depth = min(depth, {distinct_depth})
     failures = []
 
     def body():
         t = LTSeq.from_dict({{"a": [1, 2, 3], "b": [1, 1, 2]}})
         s = [depth, depth + 1, depth + 2]
-        for base, d in (
-            ("sorted", t.sort("a").derive(s=sum_of_depth(depth))),
-            ("unsorted", t.derive(s=sum_of_depth(depth))),
+        for base, d, shallow in (
+            (
+                "sorted",
+                t.sort("a").derive(s=sum_of_depth(depth)),
+                t.sort("a").derive(s=sum_of_depth(distinct_depth)),
+            ),
+            (
+                "unsorted",
+                t.derive(s=sum_of_depth(depth)),
+                t.derive(s=sum_of_depth(distinct_depth)),
+            ),
         ):
             checks = {{
                 "count": (lambda: d.count(), 3),
@@ -258,7 +277,7 @@ DOWNSTREAM = textwrap.dedent(
                 "rename": (
                     lambda: d.rename(s="z").to_arrow().column("z").to_pylist(), s
                 ),
-                "distinct": (lambda: d.distinct().count(), 3),
+                "distinct": (lambda: shallow.distinct().count(), 3),
                 "union": (
                     lambda: sorted(d.union(d).to_arrow().column("s").to_pylist()),
                     sorted(s * 2),
@@ -297,7 +316,9 @@ def test_operations_on_a_deep_plan_on_a_small_thread():
 
     depth = int(os.environ.get("LTSEQ_DEPTH_TEST_LEVELS", DEEP))
     script = DOWNSTREAM.format(
-        tests=os.path.dirname(os.path.abspath(__file__)), depth=depth
+        tests=os.path.dirname(os.path.abspath(__file__)),
+        depth=depth,
+        distinct_depth=DISTINCT_DEEP,
     )
     run = subprocess.run(
         [sys.executable, "-c", script], capture_output=True, text=True, timeout=900

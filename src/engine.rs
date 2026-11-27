@@ -3,7 +3,7 @@
 //! This module provides:
 //! - Global Tokio runtime for async operations
 //! - Configured SessionContext factory for optimal performance
-//! - ltseq's optimizer rules (`FloatListZeros`, #245; `KeepFileOrder`, #325;
+//! - ltseq's optimizer rules (`FloatListZeros`, #245;
 //!   `KeepSortsAboveOffsets`, #339; `DropFloatStatistics`, #291)
 //! - Test-only overrides of the session layout (`LayoutOverrides`)
 
@@ -11,8 +11,6 @@ use async_trait::async_trait;
 use datafusion::catalog::Session;
 use datafusion::common::config::ConfigOptions;
 use datafusion::common::tree_node::{Transformed, TreeNode};
-use datafusion::datasource::physical_plan::FileScanConfig;
-use datafusion::datasource::source::DataSourceExec;
 use datafusion::execution::config::SessionConfig;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::execution::session_state::SessionStateBuilder;
@@ -158,9 +156,6 @@ impl LayoutOverrides {
 ///   #273)
 /// - `FloatListZeros`: Last optimizer rule, so a float IN list compares
 ///   -0.0 equal to 0.0 however DataFusion built it (#245)
-/// - `KeepFileOrder`: After DataFusion's physical rules, so a scan with a
-///   declared order reads its files in order however DataFusion planned
-///   it (#325)
 /// - `NoZeroFetchSorts`: Last physical optimizer rule, so a sort kept under
 ///   `head(0)` for a key that can fail reads its whole input instead of
 ///   planning a TopK of no rows, which panics (#273)
@@ -226,8 +221,10 @@ pub(crate) fn session_context_with(overrides: LayoutOverrides) -> Arc<SessionCon
     // `DropFloatStatistics` goes before DataFusion's physical rules, so the
     // ones that read a scan's statistics see what the scan reads, and
     // `KeepSortsAboveOffsets` too, so `EnsureRequirements` sees its limits;
-    // `KeepFileOrder` after them, so it runs after `LimitPushdown`, and
-    // `NoZeroFetchSorts` last, after every rule that gives a sort a fetch.
+    // and `NoZeroFetchSorts` last, after every rule that gives a sort a
+    // fetch. (`KeepFileOrder`, #325, went with DataFusion 56: a scan with a
+    // declared output ordering always reads its files in order there,
+    // apache/datafusion#26434.)
     let rules = [
         Arc::new(DropFloatStatistics) as _,
         Arc::new(KeepSortsAboveOffsets) as _,
@@ -241,10 +238,7 @@ pub(crate) fn session_context_with(overrides: LayoutOverrides) -> Arc<SessionCon
             Arc::clone(rule)
         }
     }))
-    .chain([
-        Arc::new(KeepFileOrder) as _,
-        Arc::new(NoZeroFetchSorts) as _,
-    ])
+    .chain([Arc::new(NoZeroFetchSorts) as _])
     .collect();
     let state = SessionStateBuilder::new_from_existing(state)
         .with_optimizer_rules(logical)
@@ -353,57 +347,6 @@ impl PhysicalOptimizerRule for KeepSortsAboveOffsets {
 
     fn name(&self) -> &str {
         "ltseq_keep_sorts_above_offsets"
-    }
-
-    fn schema_check(&self) -> bool {
-        true
-    }
-}
-
-/// Makes every file scan that declares an output ordering read its files,
-/// and the row groups in them, in order (#325).
-///
-/// DataFusion builds such a scan with `preserve_order` set, but in 55
-/// `LimitPushdown` clears the flag when it pushes the fetch of a
-/// `SortPreservingMergeExec` into the scan: any limit over a declared-sorted
-/// Parquet source that two or more partitions read, which is a directory of
-/// several files or a file of 1 MiB or more split into byte ranges. Without
-/// the flag the Parquet opener prunes by the limit, skipping a row group the
-/// filter matches in part for a later one it matches whole, so `head`,
-/// `slice` and `search_first` returned matching rows that were not the
-/// first; and the partitions take files from one shared queue instead of
-/// each reading its own in order. Setting the flag again turns off only
-/// these two shortcuts, and only for scans with a declared order.
-///
-/// apache/datafusion#26434 makes a scan with an output ordering always read
-/// in order; remove this rule with the upgrade that includes it (56).
-#[derive(Debug)]
-struct KeepFileOrder;
-
-impl PhysicalOptimizerRule for KeepFileOrder {
-    fn optimize(
-        &self,
-        plan: Arc<dyn ExecutionPlan>,
-        _config: &ConfigOptions,
-    ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
-        plan.transform_up(|node| {
-            let lost_order = node
-                .downcast_ref::<DataSourceExec>()
-                .and_then(|scan| scan.data_source().downcast_ref::<FileScanConfig>())
-                .is_some_and(|scan| !scan.output_ordering.is_empty() && !scan.preserve_order);
-            if !lost_order {
-                return Ok(Transformed::no(node));
-            }
-            Ok(match node.with_preserve_order(true) {
-                Some(scan) => Transformed::yes(scan),
-                None => Transformed::no(node),
-            })
-        })
-        .map(|t| t.data)
-    }
-
-    fn name(&self) -> &str {
-        "ltseq_keep_file_order"
     }
 
     fn schema_check(&self) -> bool {

@@ -471,9 +471,10 @@ mod tests {
         }
         let _ = std::fs::remove_file(&path);
         for (p, declared, limit, shares) in shared {
-            // Today a declared order keeps the scan's partitions to their
-            // ranges, and a limit above the scan lifts that.
-            let today = !declared || limit.is_some();
+            // A declared order keeps the scan's partitions to their ranges.
+            // In DataFusion 55 a limit above the scan lifted that (#325);
+            // 56 keeps it under a limit too (apache/datafusion#26434).
+            let today = !declared;
             let m5 = p.validate != Sorted::Off;
             assert_eq!(
                 shares,

@@ -1,0 +1,190 @@
+{
+ "label": "56",
+ "ltseq_core": "/var/tmp/af296/site56/ltseq/ltseq_core.cpython-313-x86_64-linux-gnu.so",
+ "python": "3.13.18 (main, Oct 26 2026, 14:08:20) [Clang 23.1.3 ]",
+ "machine": "Linux-7.0.14-30-pve-x86_64-with-glibc2.41",
+ "processor": "x86_64",
+ "layout": {
+  "target_partitions": 8,
+  "batch_size": 8192
+ },
+ "repeat": 3,
+ "cases": [
+  {
+   "shape": "sorted",
+   "depth": 25,
+   "runs": [
+    {
+     "derive_s": 0.0059391079703345895,
+     "distinct_count_s": 0.05150570604018867,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.0017154219676740468,
+     "distinct_count_s": 0.022639821050688624,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.0017168609774671495,
+     "distinct_count_s": 0.021531930018682033,
+     "rows": 3
+    }
+   ],
+   "median_distinct_count_s": 0.022639821050688624
+  },
+  {
+   "shape": "sorted",
+   "depth": 50,
+   "runs": [
+    {
+     "derive_s": 0.005020945973228663,
+     "distinct_count_s": 0.1868825500132516,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.0050196980009786785,
+     "distinct_count_s": 0.18797768699005246,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.005042969016358256,
+     "distinct_count_s": 0.19380454195197672,
+     "rows": 3
+    }
+   ],
+   "median_distinct_count_s": 0.18797768699005246
+  },
+  {
+   "shape": "sorted",
+   "depth": 100,
+   "runs": [
+    {
+     "derive_s": 0.01801595196593553,
+     "distinct_count_s": 2.1646735169924796,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.017689231026452035,
+     "distinct_count_s": 2.1896550090168603,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.01808012800756842,
+     "distinct_count_s": 2.1683110779849812,
+     "rows": 3
+    }
+   ],
+   "median_distinct_count_s": 2.1683110779849812
+  },
+  {
+   "shape": "sorted",
+   "depth": 200,
+   "runs": [
+    {
+     "derive_s": 0.06955635797930881,
+     "distinct_count_s": 28.339111829001922,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.0707841039984487,
+     "distinct_count_s": 29.17604215099709,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.07151965604862198,
+     "distinct_count_s": 28.62503159994958,
+     "rows": 3
+    }
+   ],
+   "median_distinct_count_s": 28.62503159994958
+  },
+  {
+   "shape": "unsorted",
+   "depth": 25,
+   "runs": [
+    {
+     "derive_s": 0.0019114919705316424,
+     "distinct_count_s": 0.008245170989539474,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.0018094200058840215,
+     "distinct_count_s": 0.0056003599893301725,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.0019954490126110613,
+     "distinct_count_s": 0.005410782003309578,
+     "rows": 3
+    }
+   ],
+   "median_distinct_count_s": 0.0056003599893301725
+  },
+  {
+   "shape": "unsorted",
+   "depth": 50,
+   "runs": [
+    {
+     "derive_s": 0.005385892000049353,
+     "distinct_count_s": 0.028424932970665395,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.005054134002421051,
+     "distinct_count_s": 0.028377542039379478,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.005246687040198594,
+     "distinct_count_s": 0.028651353961322457,
+     "rows": 3
+    }
+   ],
+   "median_distinct_count_s": 0.028424932970665395
+  },
+  {
+   "shape": "unsorted",
+   "depth": 100,
+   "runs": [
+    {
+     "derive_s": 0.018048137018922716,
+     "distinct_count_s": 0.2620090319542214,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.017779344983864576,
+     "distinct_count_s": 0.26500774698797613,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.018230927002150565,
+     "distinct_count_s": 0.2626662109978497,
+     "rows": 3
+    }
+   ],
+   "median_distinct_count_s": 0.2626662109978497
+  },
+  {
+   "shape": "unsorted",
+   "depth": 200,
+   "runs": [
+    {
+     "derive_s": 0.07102831098018214,
+     "distinct_count_s": 3.2077144370414317,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.06887715996708721,
+     "distinct_count_s": 3.207355324004311,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.07311890600249171,
+     "distinct_count_s": 3.1859320949879475,
+     "rows": 3
+    }
+   ],
+   "median_distinct_count_s": 3.207355324004311
+  }
+ ]
+}

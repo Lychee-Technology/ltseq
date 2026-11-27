@@ -650,12 +650,35 @@ fn parse_where_clause(
 /// instead of raising. Lowered here, a cast that can fail is an
 /// `OpaqueCast`, which raises where a row evaluates it and which no rewrite
 /// sees through; one that keeps every value stays a `Cast`.
+///
+/// Two rules of the lambda lowering apply to SQL too (#296). A run-end
+/// encoded value of an IN list is tested decoded, as `is_in` tests it
+/// (`decoded_run_end`): DataFusion 56's set filter misses a list's NULL
+/// items on such a value, so `42 IN (NULL, 1, 2, 3)` was FALSE, not NULL
+/// (B1). The items stay as written: SQL may list columns. And a clause
+/// whose coercion casts a string to a decimal of negative scale, such as
+/// `d = '1'`, is refused, since the cast rounds it (B4).
 fn lower_casts(predicate: Expr, schema: &Arc<ArrowSchema>) -> Result<Expr, String> {
+    use datafusion::logical_expr::expr::InList;
     use datafusion::logical_expr::Cast;
     let rx = Resolver::new(schema)?;
-    predicate
+    let lowered = predicate
         .transform_up(|e| {
             Ok(match e {
+                Expr::InList(InList {
+                    expr,
+                    list,
+                    negated,
+                }) => {
+                    let decoded = crate::transpiler::decoded_run_end((*expr).clone(), &rx);
+                    let changed = decoded != *expr;
+                    let in_list = Expr::InList(InList::new(Box::new(decoded), list, negated));
+                    if changed {
+                        Transformed::yes(in_list)
+                    } else {
+                        Transformed::no(in_list)
+                    }
+                }
                 Expr::Cast(Cast { expr, field }) => {
                     let to = field.data_type().clone();
                     Transformed::yes(crate::transpiler::lower_cast(*expr, to, &rx))
@@ -679,7 +702,9 @@ fn lower_casts(predicate: Expr, schema: &Arc<ArrowSchema>) -> Result<Expr, Strin
             })
         })
         .map(|t| t.data)
-        .map_err(|e| format!("Failed to lower WHERE clause casts: {}", e))
+        .map_err(|e| format!("Failed to lower WHERE clause casts: {}", e))?;
+    rx.resolve(lowered.clone())?;
+    Ok(lowered)
 }
 
 /// A WHERE clause with a subquery (`EXISTS`, `IN (SELECT ...)`, a scalar

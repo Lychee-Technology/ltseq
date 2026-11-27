@@ -338,9 +338,18 @@ def test_the_unpinned_negative_zero_cell_is_a_fixed_bug():
     assert (k.status, k.rule) == ("BUG_FIXED", "negative_zero_in_list")
 
 
-def test_a_panicked_in_list_string_that_now_fails_at_collect_is_a_fixed_bug():
+def test_a_string_for_a_negative_scale_decimal_is_refused_at_planning():
+    """#296 (B4): DataFusion 56 rounds a string cast to decimal(10, -2), so ltseq refuses
+    it where the query is built. A collect error, which 55 gave, is no longer expected,
+    nor are values."""
+    refused = error("plan", msg="a decimal of negative scale")
+    for cell in ("dneg/s1/isin2", "dneg/s1/eq", "dneg/s1_5/shift_def"):
+        k = classified(cell, refused)
+        assert (k.status, k.rule) == ("INTENDED_CHANGE", "negative_scale_string"), cell
     k = classified("dneg/s1/isin2", error("collect", msg="Optimizer rule 'simplify_expressions' failed"))
-    assert (k.status, k.rule) == ("BUG_FIXED", "negative_scale_resolver_panic")
+    assert k.status == "REGRESSION"
+    rounded = {"type": "bool", "values": [False, None, False, False, None, True]}
+    assert classified("dneg/s1/eq", rounded).status == "REGRESSION"
 
 
 def test_the_oracle_skips_only_strings_and_booleans():

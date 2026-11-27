@@ -257,11 +257,11 @@ impl ImportedStream {
     }
 
     fn try_new(mut stream: FFI_ArrowArrayStream) -> Result<Self, LtseqError> {
-        if stream.release.is_none() {
+        if stream.release().is_none() {
             return Err(import_error("the stream is already released"));
         }
         let get_schema = stream
-            .get_schema
+            .get_schema()
             .ok_or_else(|| import_error("the stream has no get_schema"))?;
         let mut ffi_schema = FFI_ArrowSchema::empty();
         // SAFETY: `get_schema` is the callback of this live stream, called with
@@ -297,7 +297,7 @@ impl ImportedStream {
     fn next_batch(&mut self, first_row: usize) -> Result<Option<RecordBatch>, LtseqError> {
         let get_next = self
             .stream
-            .get_next
+            .get_next()
             .ok_or_else(|| import_error("the stream has no get_next"))?;
         let mut array = FFI_ArrowArray::empty();
         // SAFETY: `get_next` is the callback of this live stream, called with
@@ -342,7 +342,7 @@ fn import_error(message: &str) -> LtseqError {
 /// producer's message when it gives one.
 fn stream_error(stream: &mut FFI_ArrowArrayStream) -> LtseqError {
     let message = stream
-        .get_last_error
+        .get_last_error()
         .and_then(|get_last_error| {
             // SAFETY: `get_last_error` is the callback of this live stream; the
             // string it returns stays valid until the next call on the stream,

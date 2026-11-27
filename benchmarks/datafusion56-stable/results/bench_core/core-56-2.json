@@ -1,0 +1,346 @@
+{
+  "timestamp": "2026-11-24 09:17:16",
+  "host": {
+    "os": "Linux 7.0.14-30-pve",
+    "python": "3.13.18",
+    "cpu": "unknown",
+    "rustc": "1.97.1"
+  },
+  "engine": {
+    "target_partitions": 8,
+    "batch_size": 16384,
+    "default_batch_size": 16384,
+    "default_target_partitions": 8
+  },
+  "results": [
+    {
+      "name": "filter_10000",
+      "group": "operator",
+      "rows": 10000,
+      "time_ms": 0.63,
+      "rows_per_sec": 15952271.0
+    },
+    {
+      "name": "filter_100000",
+      "group": "operator",
+      "rows": 100000,
+      "time_ms": 0.75,
+      "rows_per_sec": 133353486.0
+    },
+    {
+      "name": "filter_1000000",
+      "group": "operator",
+      "rows": 1000000,
+      "time_ms": 5.2,
+      "rows_per_sec": 192470181.0
+    },
+    {
+      "name": "filter_complex_100000",
+      "group": "operator",
+      "rows": 100000,
+      "time_ms": 0.76,
+      "rows_per_sec": 131936680.0
+    },
+    {
+      "name": "derive_10000",
+      "group": "operator",
+      "rows": 10000,
+      "time_ms": 0.49,
+      "rows_per_sec": 20323454.0
+    },
+    {
+      "name": "derive_100000",
+      "group": "operator",
+      "rows": 100000,
+      "time_ms": 0.53,
+      "rows_per_sec": 187860344.0
+    },
+    {
+      "name": "derive_1000000",
+      "group": "operator",
+      "rows": 1000000,
+      "time_ms": 1.44,
+      "rows_per_sec": 696508018.0
+    },
+    {
+      "name": "derive_multi_100000",
+      "group": "operator",
+      "rows": 100000,
+      "time_ms": 0.81,
+      "rows_per_sec": 124112495.0
+    },
+    {
+      "name": "join_10000x10000",
+      "group": "operator",
+      "rows": 20000,
+      "time_ms": 1.55,
+      "rows_per_sec": 12876758.0
+    },
+    {
+      "name": "join_100000x10000",
+      "group": "operator",
+      "rows": 110000,
+      "time_ms": 5.24,
+      "rows_per_sec": 21001613.0
+    },
+    {
+      "name": "join_100000x100000",
+      "group": "operator",
+      "rows": 200000,
+      "time_ms": 7.35,
+      "rows_per_sec": 27197723.0
+    },
+    {
+      "name": "window_lag_10000",
+      "group": "operator",
+      "rows": 10000,
+      "time_ms": 0.95,
+      "rows_per_sec": 10514554.0
+    },
+    {
+      "name": "window_lag_100000",
+      "group": "operator",
+      "rows": 100000,
+      "time_ms": 5.0,
+      "rows_per_sec": 19980876.0
+    },
+    {
+      "name": "window_cumsum_10000",
+      "group": "operator",
+      "rows": 10000,
+      "time_ms": 2.16,
+      "rows_per_sec": 4622231.0
+    },
+    {
+      "name": "window_cumsum_100000",
+      "group": "operator",
+      "rows": 100000,
+      "time_ms": 17.24,
+      "rows_per_sec": 5800098.0
+    },
+    {
+      "name": "group_agg_10000",
+      "group": "operator",
+      "rows": 10000,
+      "time_ms": 1.19,
+      "rows_per_sec": 8408871.0
+    },
+    {
+      "name": "group_agg_100000",
+      "group": "operator",
+      "rows": 100000,
+      "time_ms": 1.41,
+      "rows_per_sec": 71038654.0
+    },
+    {
+      "name": "chain_10000",
+      "group": "operator",
+      "rows": 10000,
+      "time_ms": 1.12,
+      "rows_per_sec": 8940380.0
+    },
+    {
+      "name": "chain_100000",
+      "group": "operator",
+      "rows": 100000,
+      "time_ms": 1.15,
+      "rows_per_sec": 86685110.0
+    },
+    {
+      "name": "chain_1000000",
+      "group": "operator",
+      "rows": 1000000,
+      "time_ms": 2.82,
+      "rows_per_sec": 354135614.0
+    },
+    {
+      "name": "sort_10000",
+      "group": "operator",
+      "rows": 10000,
+      "time_ms": 1.88,
+      "rows_per_sec": 5328334.0
+    },
+    {
+      "name": "sort_100000",
+      "group": "operator",
+      "rows": 100000,
+      "time_ms": 10.65,
+      "rows_per_sec": 9392810.0
+    },
+    {
+      "name": "sort_1000000",
+      "group": "operator",
+      "rows": 1000000,
+      "time_ms": 118.7,
+      "rows_per_sec": 8424333.0
+    },
+    {
+      "name": "sort_multi_100000",
+      "group": "operator",
+      "rows": 100000,
+      "time_ms": 13.68,
+      "rows_per_sec": 7312440.0
+    },
+    {
+      "name": "group_ordered_10000",
+      "group": "operator",
+      "rows": 10000,
+      "time_ms": 5.46,
+      "rows_per_sec": 1830074.0
+    },
+    {
+      "name": "group_ordered_100000",
+      "group": "operator",
+      "rows": 100000,
+      "time_ms": 51.16,
+      "rows_per_sec": 1954680.0
+    },
+    {
+      "name": "search_first_10000",
+      "group": "operator",
+      "rows": 10000,
+      "time_ms": 0.46,
+      "rows_per_sec": 21705408.0
+    },
+    {
+      "name": "search_first_100000",
+      "group": "operator",
+      "rows": 100000,
+      "time_ms": 0.48,
+      "rows_per_sec": 206425909.0
+    },
+    {
+      "name": "mutation_insert_10000",
+      "group": "operator",
+      "rows": 10000,
+      "time_ms": 0.18,
+      "rows_per_sec": 55039609.0
+    },
+    {
+      "name": "mutation_insert_100000",
+      "group": "operator",
+      "rows": 100000,
+      "time_ms": 0.26,
+      "rows_per_sec": 378822330.0
+    },
+    {
+      "name": "mutation_delete_10000",
+      "group": "operator",
+      "rows": 10000,
+      "time_ms": 0.51,
+      "rows_per_sec": 19790852.0
+    },
+    {
+      "name": "mutation_delete_100000",
+      "group": "operator",
+      "rows": 100000,
+      "time_ms": 0.88,
+      "rows_per_sec": 113391838.0
+    },
+    {
+      "name": "mutation_update_10000",
+      "group": "operator",
+      "rows": 10000,
+      "time_ms": 0.79,
+      "rows_per_sec": 12599669.0
+    },
+    {
+      "name": "mutation_update_100000",
+      "group": "operator",
+      "rows": 100000,
+      "time_ms": 1.16,
+      "rows_per_sec": 86079162.0
+    },
+    {
+      "name": "read_csv_10000",
+      "group": "io",
+      "rows": 10000,
+      "time_ms": 3.2,
+      "rows_per_sec": 3122327.0
+    },
+    {
+      "name": "read_csv_100000",
+      "group": "io",
+      "rows": 100000,
+      "time_ms": 5.94,
+      "rows_per_sec": 16829527.0
+    },
+    {
+      "name": "read_csv_1000000",
+      "group": "io",
+      "rows": 1000000,
+      "time_ms": 38.02,
+      "rows_per_sec": 26301173.0
+    },
+    {
+      "name": "write_parquet_10000",
+      "group": "io",
+      "rows": 10000,
+      "time_ms": 1.14,
+      "rows_per_sec": 8762540.0
+    },
+    {
+      "name": "write_parquet_100000",
+      "group": "io",
+      "rows": 100000,
+      "time_ms": 13.46,
+      "rows_per_sec": 7430084.0
+    },
+    {
+      "name": "read_parquet_10000",
+      "group": "io",
+      "rows": 10000,
+      "time_ms": 1.12,
+      "rows_per_sec": 8889487.0
+    },
+    {
+      "name": "read_parquet_100000",
+      "group": "io",
+      "rows": 100000,
+      "time_ms": 5.27,
+      "rows_per_sec": 18967743.0
+    },
+    {
+      "name": "e2e_csv_filter_10000",
+      "group": "end_to_end",
+      "rows": 10000,
+      "time_ms": 3.24,
+      "rows_per_sec": 3088407.0
+    },
+    {
+      "name": "e2e_csv_filter_100000",
+      "group": "end_to_end",
+      "rows": 100000,
+      "time_ms": 6.97,
+      "rows_per_sec": 14349264.0
+    },
+    {
+      "name": "e2e_csv_filter_1000000",
+      "group": "end_to_end",
+      "rows": 1000000,
+      "time_ms": 40.53,
+      "rows_per_sec": 24673470.0
+    },
+    {
+      "name": "e2e_csv_chain_10000",
+      "group": "end_to_end",
+      "rows": 10000,
+      "time_ms": 3.08,
+      "rows_per_sec": 3250758.0
+    },
+    {
+      "name": "e2e_csv_chain_100000",
+      "group": "end_to_end",
+      "rows": 100000,
+      "time_ms": 5.79,
+      "rows_per_sec": 17269790.0
+    },
+    {
+      "name": "e2e_csv_chain_1000000",
+      "group": "end_to_end",
+      "rows": 1000000,
+      "time_ms": 27.68,
+      "rows_per_sec": 36121071.0
+    }
+  ]
+}

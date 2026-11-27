@@ -56,8 +56,10 @@ use datafusion::parquet::arrow::arrow_reader::ArrowReaderOptions;
 use datafusion::parquet::arrow::async_reader::AsyncFileReader;
 use datafusion::parquet::basic::{LogicalType, Type as PhysicalType};
 use datafusion::parquet::errors::Result as ParquetResult;
+use datafusion::parquet::file::metadata::page_index::PageIndexProvider;
 use datafusion::parquet::file::metadata::{ColumnChunkMetaData, ParquetMetaData};
 use datafusion::parquet::file::page_index::column_index::ColumnIndexMetaData;
+use datafusion::parquet::file::page_index::offset_index::OffsetIndexMetaData;
 use datafusion::parquet::file::statistics::Statistics as ChunkStatistics;
 use datafusion::parquet::schema::types::ColumnDescriptor;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
@@ -260,27 +262,65 @@ fn without_float_statistics(metadata: Arc<ParquetMetaData>) -> ParquetResult<Arc
             row_group.set_column_metadata(columns).build()
         })
         .collect::<ParquetResult<_>>()?;
-    let column_index = builder.take_column_index().map(|row_groups| {
-        (row_groups.into_iter())
-            .map(|indexes| {
-                (indexes.into_iter().zip(&floats))
-                    .map(|(index, &float)| {
-                        if float {
-                            ColumnIndexMetaData::NONE
-                        } else {
-                            index
-                        }
-                    })
-                    .collect()
-            })
-            .collect()
+    let page_index = builder.take_page_index().map(|inner| {
+        Arc::new(FloatlessPageIndex {
+            inner,
+            floats: floats.clone().into(),
+        }) as Arc<dyn PageIndexProvider>
     });
     Ok(Arc::new(
         builder
             .set_row_groups(row_groups)
-            .set_column_index(column_index)
+            .set_page_index(page_index)
             .build(),
     ))
+}
+
+/// A page index without the column index of a float leaf: the page index's
+/// min and max of such a column are hidden, its offset index and every
+/// other column's indexes are the inner provider's (#411: parquet 60 made
+/// the page index a provider trait in place of nested vectors).
+#[derive(Debug)]
+struct FloatlessPageIndex {
+    inner: Arc<dyn PageIndexProvider>,
+    floats: Arc<[bool]>,
+}
+
+impl PageIndexProvider for FloatlessPageIndex {
+    fn has_offset_indexes(&self) -> bool {
+        self.inner.has_offset_indexes()
+    }
+
+    fn has_column_indexes(&self) -> bool {
+        self.inner.has_column_indexes()
+    }
+
+    fn column_index(
+        &self,
+        row_group_idx: usize,
+        column_idx: usize,
+    ) -> Option<&ColumnIndexMetaData> {
+        if self.floats.get(column_idx).copied().unwrap_or(false) {
+            return None;
+        }
+        self.inner.column_index(row_group_idx, column_idx)
+    }
+
+    fn offset_index(
+        &self,
+        row_group_idx: usize,
+        column_idx: usize,
+    ) -> Option<&OffsetIndexMetaData> {
+        self.inner.offset_index(row_group_idx, column_idx)
+    }
+
+    fn num_data_pages(&self, row_group_idx: usize, column_idx: usize) -> Option<usize> {
+        self.inner.num_data_pages(row_group_idx, column_idx)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// A float leaf: `float32` and `float64`, and `float16`, which Parquet
@@ -400,11 +440,8 @@ mod tests {
             .map(|leaf| is_float_leaf(leaf))
             .collect();
         assert_eq!(floats, [false, true, true, true]);
-        let (index_before, index_after) = (
-            before.column_index().unwrap(),
-            after.column_index().unwrap(),
-        );
-        assert_eq!(after.offset_index(), before.offset_index());
+        let (index_before, index_after) =
+            (before.page_index().unwrap(), after.page_index().unwrap());
         assert_eq!(after.num_row_groups(), 4);
         for (g, (group_before, group_after)) in before
             .row_groups()
@@ -421,7 +458,14 @@ mod tests {
             {
                 if !floats[c] {
                     assert_eq!(chunk_after, chunk_before);
-                    assert_eq!(index_after[g][c], index_before[g][c]);
+                    assert_eq!(
+                        index_after.column_index(g, c),
+                        index_before.column_index(g, c)
+                    );
+                    assert_eq!(
+                        index_after.offset_index(g, c),
+                        index_before.offset_index(g, c)
+                    );
                     continue;
                 }
                 let (stats_before, stats_after) = (
@@ -442,8 +486,12 @@ mod tests {
                 assert!(chunk_before.bloom_filter_offset().is_some());
                 assert_eq!(chunk_after.bloom_filter_offset(), None);
                 assert_eq!(chunk_after.bloom_filter_length(), None);
-                assert!(!matches!(index_before[g][c], ColumnIndexMetaData::NONE));
-                assert!(matches!(index_after[g][c], ColumnIndexMetaData::NONE));
+                assert!(index_before.column_index(g, c).is_some());
+                assert!(index_after.column_index(g, c).is_none());
+                assert_eq!(
+                    index_after.offset_index(g, c),
+                    index_before.offset_index(g, c)
+                );
             }
         }
     }

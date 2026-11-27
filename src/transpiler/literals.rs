@@ -31,8 +31,8 @@ use datafusion::scalar::ScalarValue;
 
 use super::exact::{hold_instant, Holding, Placement};
 use super::literal_policy::{
-    exact_domain, fit, held, interpret, literal_text, timestamp_literal, widening, Fit, Position,
-    Reading, Widening,
+    exact_domain, fit, held, interpret, literal_text, negative_scale_string, timestamp_literal,
+    widening, Fit, Position, Reading, Widening,
 };
 use super::Resolver;
 
@@ -360,6 +360,43 @@ pub(crate) fn encoded_float(data_type: &DataType) -> Option<DataType> {
     (value != data_type && value.is_floating()).then(|| value.clone())
 }
 
+/// `expr` decoded to its value type when it is run-end encoded (also
+/// inside a dictionary), else `expr` as it is.
+///
+/// DataFusion 56 compares a run-end encoded value with an IN list at the
+/// encoded type, where 55 decoded it first, and its set filter for a list
+/// of four items or more reads the list's NULL items by `null_count`, which
+/// is 0 for a run-end encoded array, whose nulls are in its values: a value
+/// outside a list that holds NULL tested FALSE instead of NULL (B1 of the
+/// DataFusion 56 spike, #296). The decoding is a cast in the plan, as in
+/// [`decoded_float`], so the input keeps its encoding everywhere else, and
+/// the items are placed among the decoded values. A WHERE clause's IN list
+/// is tested decoded too (`filter_where`, R1-F2 of #296's review).
+pub(crate) fn decoded_run_end(expr: Expr, rx: &Resolver<'_>) -> Expr {
+    match rx.data_type(&expr).ok().as_ref().and_then(run_end_value) {
+        Some(value_type) => cast(expr, value_type),
+        None => expr,
+    }
+}
+
+/// The value type of `data_type` when a run-end encoding is part of it
+/// (also under or over a dictionary); `None` for any other type.
+fn run_end_value(data_type: &DataType) -> Option<DataType> {
+    let mut value = data_type;
+    let mut run_end = false;
+    loop {
+        value = match value {
+            DataType::Dictionary(_, value) => value,
+            DataType::RunEndEncoded(_, values) => {
+                run_end = true;
+                values.data_type()
+            }
+            _ => break,
+        };
+    }
+    run_end.then(|| value.clone())
+}
+
 /// `low <= value <= high` as `value >= low AND value <= high`, or for
 /// `negated` its complement, `value < low OR value > high`. It names
 /// `value` twice, so `value` must not be volatile.
@@ -370,8 +407,8 @@ pub(crate) fn encoded_float(data_type: &DataType) -> Option<DataType> {
 /// zeros and nothing else, also where the zeros are not normalized (an
 /// encoded column, #292); it holds no NaN, as `=` does not take a NaN to
 /// equal a zero. DataFusion neither merges a range into an IN list nor
-/// unfolds it into `=`, so it never meets the simplifier's intersection
-/// and difference of lists, which lose NULL results (#296).
+/// unfolds it into `=`, so it never met DataFusion 55's intersection and
+/// difference of lists, which lost NULL results (#296).
 pub(super) fn within(value: Expr, (low, high): (Expr, Expr), negated: bool) -> Expr {
     debug_assert!(!value.is_volatile(), "a range names its value twice");
     if negated {
@@ -448,8 +485,10 @@ fn compared(
 /// list is split into one IN per comparison type, joined by OR. All types
 /// come from DataFusion's coercion of the equality and of the IN. Each IN
 /// is built by [`membership`], which keeps a float list from deciding a
-/// zero by its sign.
+/// zero by its sign. A run-end encoded `expr` is tested decoded
+/// ([`decoded_run_end`]).
 pub(crate) fn in_list(expr: Expr, list: Vec<Expr>, rx: &Resolver<'_>) -> Result<Expr, String> {
+    let expr = decoded_run_end(expr, rx);
     // Each kept item, with its equality's two sides as DataFusion coerces them.
     let mut kept = Vec::with_capacity(list.len());
     for item in list {
@@ -566,10 +605,12 @@ fn membership(
 /// and 0.0. Every item is a literal (#294), so lowering leaves no zero for
 /// [`super::float_lists`] to complete.
 ///
-/// A list holding a zero meets DataFusion's intersection and difference
-/// of lists (#296), which the range keeps a zero out of elsewhere. Those
-/// combine two lists on one value, and two lists on a volatile value test
-/// two draws, which they combine wrongly whatever the items (#296).
+/// A list holding a zero met DataFusion 55's intersection and difference
+/// of lists, which the range keeps a zero out of elsewhere, and two lists
+/// on a volatile value, which test two draws, were combined as one (#296).
+/// DataFusion 56 applies that algebra only to lists of literals that are
+/// neither NULL nor floats, on a value that is not volatile
+/// (apache/datafusion#24952), so neither list meets it there.
 fn listed_once(
     value: Expr,
     items: Vec<ListItem>,
@@ -774,6 +815,13 @@ fn values(
         ),
         [] => unreachable!("checked above"),
     };
+    // A string the values unify to a decimal of negative scale with would
+    // be rounded to it (#296, B4).
+    if let Ok(unified) = unified_type(values.clone()) {
+        for literal in literals.iter().flatten() {
+            negative_scale_string(literal, &unified, &name)?;
+        }
+    }
     // Read each literal next to the context. One that is not judged there
     // becomes a value as written, like the values that are not literals.
     for (value, literal) in values.iter_mut().zip(literals.iter_mut()) {
@@ -962,7 +1010,9 @@ pub(crate) fn shift_default(
     let name = describe(column);
     match fixed_target(default, &column_type, &name)? {
         (_, Fit::Exactly(value)) => Ok(value),
-        (read, Fit::Unjudged) => Ok(read),
+        // `lag`/`lead` would cast a string to a negative-scale decimal by
+        // rounding it (#296, B4).
+        (read, Fit::Unjudged) => negative_scale_string(&read, &column_type, &name).map(|()| read),
         (read, Fit::Inexact) => Err(format!(
             "{name} cannot hold the shift() default {} exactly ({column_type})",
             literal_text(&read)

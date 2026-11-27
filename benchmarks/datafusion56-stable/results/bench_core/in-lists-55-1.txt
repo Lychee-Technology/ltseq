@@ -1,0 +1,4 @@
+| x in A & x in B (intersection) | 4.2 |
+| x in A & ~x in [None, ...] (difference) | 7.3 |
+| x in A | x in B (union) | 7.4 |
+| f in A & f in B, floats | 5.2 |

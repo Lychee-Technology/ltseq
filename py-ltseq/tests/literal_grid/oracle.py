@@ -917,33 +917,15 @@ def _wrap_i64(value):
     return ((value + 2**63) % 2**64) - 2**63
 
 
-def _powi(base, n):
-    """Rust's f64::powi: repeated squaring, then the reciprocal for a negative exponent."""
-    result, recip, n = 1.0, n < 0, abs(n)
-    while True:
-        if n & 1:
-            result *= base
-        n >>= 1
-        if n == 0:
-            break
-        base *= base
-    return 1.0 / result if recip else result
-
-
-def _i256_to_f64(n):
-    """arrow's i256::to_f64: the top 64 bits, scaled back."""
-    shift = (n.bit_length() if n >= 0 else (-n - 1).bit_length()) - 63
-    return float(n >> shift) * 2.0**shift if shift > 0 else float(n)
-
-
 def _as_f64(t, value):
     """The column's value cast to Float64 as Arrow casts it: exact from an integer type,
-    unscaled-then-divided (lossy) from a decimal."""
+    and the nearest double from a decimal. Arrow 60 (#296) divides an unscaled value below
+    2**53 by an exact power of ten, which rounds once, and parses the decimal's text
+    otherwise; arrow 59 truncated a decimal256 to its top 64 bits first, so 10**44 was
+    9.999999999999999e43."""
     if t[0] != "decimal":
         return float(value)
-    unscaled = int(value * Fraction(10) ** t[2])
-    f = _i256_to_f64(unscaled) if t[3] == 256 else float(unscaled)
-    return f / _powi(10.0, t[2])
+    return float(Fraction(value))
 
 
 def _exact_arithmetic(t, lit, pos, column, literal):

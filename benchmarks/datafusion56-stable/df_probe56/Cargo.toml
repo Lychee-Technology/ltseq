@@ -1,0 +1,20 @@
+# #296 / R1-F5 of PR #423's review: the #411 direct DataFusion probe
+# (../../datafusion56/df_probe/probe.rs, unchanged) against the stable
+# DataFusion 56.0.0 release from crates.io. Cargo.lock beside this file pins
+# the resolved graph; build with `cargo run --release --locked -q -- CASES`.
+# The 55 side is ../../datafusion56/df_probe/df55, unchanged.
+[package]
+name = "df296_probe_56_stable"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "df296_probe_56_stable"
+path = "../../datafusion56/df_probe/probe.rs"
+
+[dependencies]
+datafusion = "=56.0.0"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
+
+[workspace]

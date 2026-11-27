@@ -73,6 +73,7 @@ use datafusion::optimizer::analyzer::type_coercion::TypeCoercionRewriter;
 use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion::scalar::ScalarValue;
 
+use super::literal_policy::negative_scale_string_cast;
 use super::narrow_decimals;
 
 /// Why DataFusion did not answer a type question.
@@ -169,8 +170,14 @@ impl<'a> Resolver<'a> {
     /// reports the problem where it always has, when the plan is built or run.
     /// One whose coercion panics is an error, since building its plan would
     /// panic again.
+    ///
+    /// A resolved expression that casts a string to a decimal of negative
+    /// scale is refused ([`negative_scale_string_cast`], #296).
     pub(crate) fn resolve(&self, expr: Expr) -> Result<Expr, String> {
-        Ok(self.coerced(&expr)?.unwrap_or(expr))
+        let resolved = self.coerced(&expr)?.unwrap_or(expr);
+        let schema = &self.schema;
+        negative_scale_string_cast(&resolved, &|operand| ask(|| operand.get_type(schema)).ok())?;
+        Ok(resolved)
     }
 
     /// `expr` coerced as [`Resolver::resolve`] coerces it, or `None` where
@@ -475,11 +482,12 @@ mod tests {
     fn a_case_is_typed_by_every_branch() {
         let arrow = schema();
         let rx = Resolver::new(&arrow).unwrap();
-        // Uncoerced, DataFusion reports the first THEN branch's type.
+        // Uncoerced, DataFusion 55 reported the first THEN branch's type;
+        // 56 reports the type the branches coerce to, as the resolver does.
         let df_schema = DFSchema::try_from(arrow.clone()).unwrap();
         assert_eq!(
             when("s", "us").get_type(&df_schema).unwrap(),
-            DataType::Timestamp(TimeUnit::Second, None)
+            DataType::Timestamp(TimeUnit::Microsecond, None)
         );
         let cases = [
             (

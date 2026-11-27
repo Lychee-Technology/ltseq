@@ -47,7 +47,7 @@ use datafusion::logical_expr::{
 };
 use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::aggregates::group_values::{new_group_values, GroupValues};
-use datafusion::physical_plan::aggregates::order::GroupOrdering;
+use datafusion::physical_plan::aggregates::order::GroupClustering;
 use datafusion::physical_plan::execution_plan::CardinalityEffect;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
@@ -309,7 +309,7 @@ impl ExecutionPlan for OneRowPerKeyExec {
             column: self.column.clone(),
             seen: new_group_values(
                 Arc::new(ArrowSchema::new(vec![key_field])),
-                &GroupOrdering::None,
+                &GroupClustering::None,
             )?,
             groups: Vec::new(),
         };

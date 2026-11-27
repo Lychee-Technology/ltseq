@@ -627,13 +627,13 @@ impl TableProvider for TableOrder {
     async fn scan(
         &self,
         session: &dyn Session,
-        projection: Option<&Vec<usize>>,
+        projection: Option<&[usize]>,
         filters: &[Expr],
         _limit: Option<usize>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         let position = self.position();
         let indices: Vec<usize> = match projection {
-            Some(indices) => indices.clone(),
+            Some(indices) => indices.to_vec(),
             None => (0..=position).collect(),
         };
         let mut df = DataFrame::new(self.state.clone(), self.plan.clone());

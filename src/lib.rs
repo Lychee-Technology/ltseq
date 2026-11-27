@@ -26,8 +26,6 @@ pub(crate) mod format; // Formatting and display functions
 pub(crate) mod gil; // GIL release boundary for heavy execution (issue #142)
 #[cfg(feature = "m0")]
 pub(crate) mod m0; // Prototypes priced by the #251 measurements (feature `m0`)
-#[cfg(feature = "stream_spike")]
-pub(crate) mod stream_spike; // #256's stream error spike (feature `stream_spike`)
 pub(crate) mod metadata; // SortSpec and sort-metadata helpers
 pub(crate) mod order_key; // The value a float sorts by in §9.4's order (#268)
 pub(crate) mod ops; // Table operations grouped by category
@@ -946,6 +944,11 @@ impl LTSeqTable {
     ///
     /// Returns:
     ///     New LTSeqTable with rows matching the WHERE clause
+    ///
+    /// Raises:
+    ///     RuntimeError: The clause does not parse, holds a subquery, or
+    ///         compares a string with a decimal of negative scale, which
+    ///         would round it (`d = '1'` on `decimal128(10, -2)`, #296)
     fn filter_where(&self, where_clause: &str) -> PyResult<LTSeqTable> {
         stack::planned(|| crate::ops::aggregation::filter_where_impl(self, where_clause))
     }
@@ -1456,14 +1459,6 @@ fn ltseq_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(m0::_set_m0_prototypes, m)?)?;
         m.add_function(wrap_pyfunction!(m0::_m0_prototypes, m)?)?;
         m.add_function(wrap_pyfunction!(m0::_m0_build, m)?)?;
-    }
-    #[cfg(feature = "stream_spike")]
-    {
-        m.add_class::<stream_spike::reader::SpikeBatches>()?;
-        m.add_function(wrap_pyfunction!(stream_spike::_spike_batches, m)?)?;
-        m.add_function(wrap_pyfunction!(stream_spike::_spike_stream, m)?)?;
-        m.add_function(wrap_pyfunction!(stream_spike::_spike_live, m)?)?;
-        m.add_function(wrap_pyfunction!(stream_spike::_spike_classes, m)?)?;
     }
     Ok(())
 }

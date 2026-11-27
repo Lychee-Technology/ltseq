@@ -53,6 +53,8 @@
 use chrono::{DateTime, LocalResult, NaiveDateTime, Offset, TimeZone};
 use datafusion::arrow::array::timezone::Tz;
 use datafusion::arrow::datatypes::{DataType, TimeUnit};
+use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
+use datafusion::logical_expr::{Cast, Expr, TryCast};
 use datafusion::scalar::ScalarValue;
 
 use super::exact::{
@@ -84,6 +86,111 @@ pub(crate) enum Position {
     /// A value that shares a result column with others: a branch of
     /// `if_else`, an argument of `coalesce`/`fill_null`, a `shift` default.
     Value,
+}
+
+/// Refuses a string literal read as a decimal of negative scale (#296, B4
+/// of the DataFusion 56 spike). Such a decimal holds multiples of
+/// 10^-scale, and DataFusion 56 casts a string to it by rounding, so `"1"`
+/// is 0 in `decimal128(10, -2)` and compares equal to 0; 55 refused the
+/// cast at collect. LTSeq refuses it where the query is built, in every
+/// position that casts the string to the decimal: a comparison, an `is_in`
+/// item, a value DataFusion unifies to the decimal, and a `shift` default
+/// (`insert` and `update` refuse a string for any decimal column already).
+/// A string that the decimal is cast to instead, as in `if_else(c, "1",
+/// r.d)`, is a string value, and is not refused.
+pub(crate) fn negative_scale_string(
+    literal: &ScalarValue,
+    decimal: &DataType,
+    name: &str,
+) -> Result<(), String> {
+    use DataType as T;
+    use ScalarValue as S;
+    let scale = match decimal {
+        T::Decimal32(_, scale)
+        | T::Decimal64(_, scale)
+        | T::Decimal128(_, scale)
+        | T::Decimal256(_, scale) => *scale,
+        _ => return Ok(()),
+    };
+    if scale >= 0
+        || !matches!(
+            literal,
+            S::Utf8(Some(_)) | S::LargeUtf8(Some(_)) | S::Utf8View(Some(_))
+        )
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "{name} is {decimal}, a decimal of negative scale, which would round the string '{}' \
+         to a multiple of 10^{}; use a Decimal literal",
+        literal_text(literal),
+        // `i8::MIN` has no `i8` negation; its magnitude is 128 (R1-F1).
+        scale.unsigned_abs()
+    ))
+}
+
+/// Refuses a coerced expression that casts a string to a decimal of
+/// negative scale anywhere in it (R1-F3 of #296's review).
+///
+/// [`negative_scale_string`] refuses a string literal where lowering reads
+/// it; this is the same rule for a string that is no literal there: a
+/// column `derive` staged (`r.d == r.s`), a WHERE clause's `d = '1'`, or
+/// any other operand DataFusion's coercion casts to the decimal. Such a
+/// cast rounds the string, so `'1'` compares equal to 0 in
+/// `decimal128(10, -2)`. `coerced` is an expression DataFusion's analyzer
+/// coercion has rewritten, so every cast it inserts is a `Cast` here. A
+/// cast the program writes (`cast()`, SQL's `CAST`) is lowered to an
+/// opaque cast that raises on a failing row instead, and is not refused.
+/// A decimal cast to a string, as in `if_else(c, "1", r.d)`, is not
+/// either.
+pub(crate) fn negative_scale_string_cast(
+    coerced: &Expr,
+    type_of: &impl Fn(&Expr) -> Option<DataType>,
+) -> Result<(), String> {
+    use DataType as T;
+    let mut refused = None;
+    let _ = coerced.apply(|e| {
+        let (input, to) = match e {
+            Expr::Cast(Cast { expr, field }) | Expr::TryCast(TryCast { expr, field }) => {
+                (expr, field.data_type())
+            }
+            _ => return Ok(TreeNodeRecursion::Continue),
+        };
+        let scale = match to {
+            T::Decimal32(_, scale)
+            | T::Decimal64(_, scale)
+            | T::Decimal128(_, scale)
+            | T::Decimal256(_, scale)
+                if *scale < 0 =>
+            {
+                *scale
+            }
+            _ => return Ok(TreeNodeRecursion::Continue),
+        };
+        let string = match type_of(input) {
+            Some(T::Utf8 | T::LargeUtf8 | T::Utf8View) => true,
+            Some(T::Dictionary(_, value)) => {
+                matches!(*value, T::Utf8 | T::LargeUtf8 | T::Utf8View)
+            }
+            _ => false,
+        };
+        if !string {
+            return Ok(TreeNodeRecursion::Continue);
+        }
+        let what = match input.as_ref() {
+            Expr::Literal(literal, _) => format!("the string '{}'", literal_text(literal)),
+            Expr::Column(column) => format!("the string column '{}'", column.name),
+            input => format!("the string {input}"),
+        };
+        refused = Some(format!(
+            "comparing or unifying {what} with {to}, a decimal of negative scale, would \
+             round it to a multiple of 10^{}; use a Decimal value, or cast the decimal to a \
+             string to compare strings",
+            scale.unsigned_abs()
+        ));
+        Ok(TreeNodeRecursion::Stop)
+    });
+    refused.map_or(Ok(()), Err)
 }
 
 /// How to read `literal` next to a value of type `context` in `position`,
@@ -146,6 +253,13 @@ pub(crate) fn interpret(
              columns",
             literal_text(literal)
         )),
+        // A string compared with a decimal of negative scale (B4, #296).
+        (
+            T::Decimal32(..) | T::Decimal64(..) | T::Decimal128(..) | T::Decimal256(..),
+            S::Utf8(_) | S::LargeUtf8(_) | S::Utf8View(_),
+        ) if position == Position::Comparison => {
+            negative_scale_string(literal, context, name).map(|()| Reading::Keep)
+        }
         (T::Timestamp(unit, zone), _) => zoned(literal, *unit, zone.as_deref(), position, name),
         _ => Ok(Reading::Keep),
     }
@@ -436,6 +550,22 @@ mod tests {
 
     const HOUR_US: i64 = 3_600_000_000;
     const JAN_1_2024_US: i64 = 1_704_067_200_000_000; // 2024-01-01 00:00 UTC
+
+    /// R1-F1 of #296: the refusal names the scale's magnitude without
+    /// negating it in `i8`, which overflows at -128, the lowest scale.
+    #[test]
+    fn a_negative_scale_string_is_refused_down_to_the_lowest_scale() {
+        let one = S::Utf8(Some("1".into()));
+        for (decimal, magnitude) in [
+            (T::Decimal128(10, -128), "10^128"),
+            (T::Decimal256(10, i8::MIN), "10^128"),
+            (T::Decimal32(9, -1), "10^1"),
+        ] {
+            let err = negative_scale_string(&one, &decimal, "column 'd'").unwrap_err();
+            assert!(err.contains(magnitude), "{err}");
+        }
+        assert!(negative_scale_string(&one, &T::Decimal128(10, 0), "column 'd'").is_ok());
+    }
 
     #[test]
     fn readings() {

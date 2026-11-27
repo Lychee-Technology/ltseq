@@ -1,5 +1,11 @@
 # Stream error spike report (#256)
 
+> **The spike's code was removed** (#296: the owner retired the
+> `stream_spike` feature rather than port it to arrow 60, since M1 replaces
+> it). This report and `results/` are the record. The code it describes
+> (`src/stream_spike/`, `ltseq._stream_spike`, `test_stream_spike.py` and
+> the scripts named below) can be read at commit `291aa14`.
+
 #256 asks, before M1 builds `to_batches()` and the PyCapsule stream, whether
 the two error paths of the v0.5 contract can be built as written, and what
 the first one costs. It is also the feasibility check on OD-X6, which the

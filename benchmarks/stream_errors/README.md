@@ -1,61 +1,33 @@
 # Stream error spike (#256)
 
-Before M1 builds `to_batches()` and the PyCapsule stream, #256 asks whether
+Before M1 builds `to_batches()` and the PyCapsule stream, #256 asked whether
 the two error paths of the v0.5 contract hold: Python reads of
 `to_batches()` raise LTSeq's own class (§15.1), and the C stream ends with
 `EIO` or `EINVAL` and a message that starts with the class name (§16.4). It
-also gates OD-X6: does closing the reader stop the execution? The findings
+also gated OD-X6: does closing the reader stop the execution? The findings
 are in [REPORT.md](REPORT.md); the raw results are under
 [results/](results/).
 
-| | What | Script | Results |
-|---|---|---|---|
-| Steps 1 and 2 | What each consumer raises for each error source, and what `close()` and dropping a reader release, for pyarrow's readers and the native subclass | `probe.py` | `results/probe.md`, `.json` |
-| Step 3 | What reading `to_batches()` through the Rust iterator costs against today's C stream, idle and with a busy Python thread | `bench.py` | `results/bench.md`, `.json` |
+| | What | Results |
+|---|---|---|
+| Steps 1 and 2 | What each consumer raises for each error source, and what `close()` and dropping a reader release, for pyarrow's readers and the native subclass | `results/probe.md`, `.json` |
+| Step 3 | What reading `to_batches()` through the Rust iterator costs against today's C stream, idle and with a busy Python thread | `results/bench.md`, `.json` |
 
-## The spike
+## The code is gone
 
-Everything compiles only with the `stream_spike` cargo feature, so no shipped
-build carries it, and M1 replaces it.
-
-- `src/stream_spike/reader.rs`: `_SpikeBatches`, a PyO3 iterator over one
-  execution. `ltseq._stream_spike.to_batches(t)` wraps it in
-  `pyarrow.RecordBatchReader.from_batches`. Its `gil` argument picks how
-  `next()` waits: `detach` (ADR 0016's rule), `attached` (a lower bound,
-  not a candidate) or `poll`.
-- `src/stream_spike/capsule.rs`: a C stream with its own callbacks, which
-  ends with `EIO` for `LTSeqIOError` and `SourceNotFoundError` and `EINVAL`
-  otherwise, with `get_last_error` returning `"<class>: <message>"`.
-  `ltseq._stream_spike.Stream(t)` exposes it as `__arrow_c_stream__`.
-- `src/stream_spike/classify.rs`: the class of an execution error, from the
-  error at the bottom of DataFusion's chain.
-- `py-ltseq/ltseq/_stream_spike.py`: stand-ins for the contract's exception
-  classes (§20.1), which do not exist yet, and the helpers above. A
-  `fault=(after, class, message)` raises a class after `after` batches.
-  `OrderViolationError` has no execution error today, so only a fault can
-  raise it; `ArithmeticOverflowError` has one, `INT64_MIN // -1`, which the
-  probe and the tests read alongside the injected fault.
-- `_closing_reader.pyx`: OD-X6's option (e), a Cython subclass of
-  `pyarrow.RecordBatchReader` that shares the C++ reader `from_batches`
-  builds and closes the Rust iterator on `close()`. `closing_reader.py`
-  compiles it against the installed pyarrow (Cython and a C++20 compiler)
-  under `target/stream_errors/closing_reader/`, and its `to_batches(t)`
-  returns it. The probe leaves its columns out when it cannot be built.
-- `py-ltseq/tests/test_stream_spike.py` holds the spike to the report's
-  outcomes; it skips on a default build, and its native-subclass tests skip
-  without Cython.
-
-## Running
+The spike was retired, not ported, when LTSeq moved to DataFusion 56 and
+arrow 60 (#296): its C stream wrote fields arrow 60 made private, and M1
+replaces it anyway. The `stream_spike` cargo feature, `src/stream_spike/`,
+`py-ltseq/ltseq/_stream_spike.py`, `py-ltseq/tests/test_stream_spike.py`
+and this directory's scripts (`probe.py`, `bench.py`, `closing_reader.py`,
+`_closing_reader.pyx`) were removed. Read them at commit `291aa14`, the
+last commit that has them:
 
 ```bash
-maturin develop --release --features stream_spike
-uv pip install duckdb polars cython   # for their columns; none is a project dependency
-python benchmarks/stream_errors/probe.py
-python benchmarks/stream_errors/bench.py           # about 15 minutes; --quick for a trial
-pytest py-ltseq/tests/test_stream_spike.py
+git show 291aa14:benchmarks/stream_errors/README.md   # how the spike was built and run
+git ls-tree -r --name-only 291aa14 src/stream_spike benchmarks/stream_errors
 ```
 
-`bench.py` writes its 640 MiB input (the R3 harness's 8 Parquet files)
-under `target/stream_errors/` on its first run, and runs each cell in a
-fresh process. It takes `--partitions`, `--batch-sizes`,
-`--busy-batch-sizes`, `--repeat` and `--busy-repeat`.
+Nothing checks the spike's outcomes any more (the class kept on reads, the
+errno mapping, what `close()` does), so a pyarrow, DuckDB or Polars upgrade
+that changes one goes unnoticed until M1's own tests cover those paths.
