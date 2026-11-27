@@ -469,4 +469,232 @@ mod tests {
             LayoutOverrides::default()
         );
     }
+
+    async fn physical_plan_text(session: &SessionContext, sql: &str) -> String {
+        let df = session.sql(sql).await.expect("valid SQL");
+        let plan = df.create_physical_plan().await.expect("physical plan");
+        let text = datafusion::physical_plan::displayable(plan.as_ref())
+            .indent(true)
+            .to_string();
+        text
+    }
+
+    fn plan_line<'a>(plan: &'a str, prefix: &str) -> &'a str {
+        plan.lines()
+            .find(|line| line.contains(prefix))
+            .unwrap_or_else(|| panic!("missing `{prefix}` in plan:\n{plan}"))
+    }
+
+    fn register_t2(session: &SessionContext) {
+        use datafusion::arrow::array::{Int64Array, RecordBatch};
+        use datafusion::arrow::datatypes::{DataType, Field, Schema};
+        use datafusion::datasource::MemTable;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("k", DataType::Int64, false),
+            Field::new("x", DataType::Int64, true),
+            Field::new("y", DataType::Int64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int64Array::from(vec![0, 1, 2, 3])),
+                Arc::new(Int64Array::from(vec![Some(1), Some(5), Some(9), None])),
+                Arc::new(Int64Array::from(vec![Some(0), Some(5), None, Some(0)])),
+            ],
+        )
+        .expect("valid t2 batch");
+        let table = MemTable::try_new(schema, vec![vec![batch]]).expect("t2 MemTable");
+        session
+            .register_table("t2", Arc::new(table))
+            .expect("register t2");
+    }
+
+    #[test]
+    fn dynamic_case_in_list_projection_and_filter_t1() {
+        use datafusion::arrow::array::{Array, BooleanArray, Int32Array};
+
+        let session = session_context_with(LayoutOverrides::default());
+        RUNTIME.block_on(async {
+            session
+                .sql("CREATE TABLE t (n INT, d INT) AS VALUES (2, 0), (10, 2), (5, 2), (7, 1)")
+                .await
+                .expect("create t")
+                .collect()
+                .await
+                .expect("populate t");
+
+            let proj_sql = "SELECT n, n IN (2, 100, 101, CASE WHEN d > 5 THEN 1 ELSE d END * 5) AS result FROM t ORDER BY n";
+            let proj_plan = physical_plan_text(&session, proj_sql).await;
+            let proj_line = plan_line(&proj_plan, "ProjectionExec:");
+            assert!(
+                proj_line.contains("IN ([") && proj_line.contains("CASE WHEN"),
+                "expected dynamic IN list in projection plan:\n{proj_plan}"
+            );
+            assert!(
+                !proj_line.contains("IN (SET)"),
+                "unexpected static IN (SET) in projection plan:\n{proj_plan}"
+            );
+
+            let batches = session
+                .sql(proj_sql)
+                .await
+                .expect("proj sql")
+                .collect()
+                .await
+                .expect("proj collect");
+            let mut got_proj = Vec::new();
+            for batch in batches {
+                let n = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .expect("n Int32Array");
+                let res = batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<BooleanArray>()
+                    .expect("result BooleanArray");
+                for row in 0..batch.num_rows() {
+                    got_proj.push((
+                        n.value(row),
+                        (!res.is_null(row)).then(|| res.value(row)),
+                    ));
+                }
+            }
+            assert_eq!(
+                got_proj,
+                vec![
+                    (2, Some(true)),
+                    (5, Some(false)),
+                    (7, Some(false)),
+                    (10, Some(true)),
+                ]
+            );
+
+            let filter_sql = "SELECT n FROM t WHERE n IN (2, 100, 101, CASE WHEN d > 5 THEN 1 ELSE d END * 5) ORDER BY n";
+            let filter_plan = physical_plan_text(&session, filter_sql).await;
+            let filter_line = plan_line(&filter_plan, "FilterExec:");
+            assert!(
+                filter_line.contains("IN ([") && filter_line.contains("CASE WHEN"),
+                "expected dynamic IN list in filter plan:\n{filter_plan}"
+            );
+            assert!(
+                !filter_line.contains("IN (SET)"),
+                "unexpected static IN (SET) in filter plan:\n{filter_plan}"
+            );
+
+            let batches = session
+                .sql(filter_sql)
+                .await
+                .expect("filter sql")
+                .collect()
+                .await
+                .expect("filter collect");
+            let kept: Vec<i32> = batches
+                .iter()
+                .flat_map(|batch| {
+                    batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<Int32Array>()
+                        .expect("n Int32Array")
+                        .values()
+                        .iter()
+                        .copied()
+                })
+                .collect();
+            assert_eq!(kept, vec![2, 10]);
+        });
+    }
+
+    #[test]
+    fn dynamic_case_in_list_null_semantics_t2() {
+        use datafusion::arrow::array::{Array, BooleanArray, Int64Array};
+
+        let session = session_context_with(LayoutOverrides::default());
+        register_t2(&session);
+        RUNTIME.block_on(async {
+            let proj_sql = "SELECT k, x IN (CASE WHEN y = 0 THEN 1 ELSE y END, 20, 21, 22) AS result FROM t2 ORDER BY k";
+            let proj_plan = physical_plan_text(&session, proj_sql).await;
+            let proj_line = plan_line(&proj_plan, "ProjectionExec:");
+            assert!(
+                proj_line.contains("IN ([") && proj_line.contains("CASE WHEN"),
+                "expected dynamic IN list in T2 projection plan:\n{proj_plan}"
+            );
+            assert!(
+                !proj_line.contains("IN (SET)"),
+                "unexpected static IN (SET) in T2 projection plan:\n{proj_plan}"
+            );
+
+            let batches = session
+                .sql(proj_sql)
+                .await
+                .expect("t2 proj sql")
+                .collect()
+                .await
+                .expect("t2 proj collect");
+            let mut got = Vec::new();
+            for batch in batches {
+                let res = batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<BooleanArray>()
+                    .expect("result BooleanArray");
+                for row in 0..batch.num_rows() {
+                    got.push((!res.is_null(row)).then(|| res.value(row)));
+                }
+            }
+            assert_eq!(got, vec![Some(true), Some(true), None, None]);
+
+            let filter_sql =
+                "SELECT k FROM t2 WHERE x IN (CASE WHEN y = 0 THEN 1 ELSE y END, 20, 21, 22) ORDER BY k";
+            let filter_plan = physical_plan_text(&session, filter_sql).await;
+            let filter_line = plan_line(&filter_plan, "FilterExec:");
+            assert!(
+                filter_line.contains("IN ([") && filter_line.contains("CASE WHEN"),
+                "expected dynamic IN list in T2 filter plan:\n{filter_plan}"
+            );
+            assert!(
+                !filter_line.contains("IN (SET)"),
+                "unexpected static IN (SET) in T2 filter plan:\n{filter_plan}"
+            );
+
+            let batches = session
+                .sql(filter_sql)
+                .await
+                .expect("t2 filter sql")
+                .collect()
+                .await
+                .expect("t2 filter collect");
+            let kept: Vec<i64> = batches
+                .iter()
+                .flat_map(|batch| {
+                    batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .expect("k Int64Array")
+                        .values()
+                        .iter()
+                        .copied()
+                })
+                .collect();
+            assert_eq!(kept, vec![0, 1]);
+        });
+    }
+
+    #[test]
+    fn literal_only_in_list_retains_static_filter() {
+        let session = session_context_with(LayoutOverrides::default());
+        register_t2(&session);
+        RUNTIME.block_on(async {
+            let plan = physical_plan_text(&session, "SELECT k FROM t2 WHERE x IN (1, 2, 3, 4)").await;
+            let filter_line = plan_line(&plan, "FilterExec:");
+            assert!(
+                filter_line.contains("IN (SET)"),
+                "expected literal-only IN list to keep IN (SET):\n{plan}"
+            );
+        });
+    }
 }
