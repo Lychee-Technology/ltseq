@@ -275,8 +275,22 @@ class AdvancedOpsMixin(LTSeqLike):
         """
         Align table rows to a reference sequence.
 
-        Reorders rows to match ref_sequence order and inserts NULL rows
-        for missing keys.
+        Reorders rows to match ref_sequence order. For each reference key
+        the table lacks, inserts a row whose key column holds that
+        reference key and whose other columns are NULL. Rows whose key is
+        not in ref_sequence are dropped; a key the table holds several
+        times yields all of its rows at that reference position, in no
+        specified order.
+
+        The result declares no sort order, even when ref_sequence ascends:
+        call ``sort()`` before an operation that needs one.
+
+        ``align`` is removed in v0.5 (§13.2). The equivalent is a LEFT JOIN
+        from an axis table, ``LTSeq.from_dict({"k": ref_sequence}).join(t,
+        on="k", how="left")`` followed by ``sort("k")``, where ``k`` is the
+        key column. A join keeps no row order, so a reference order that is
+        not the key's own order needs a position column in the axis table to
+        sort by.
 
         Args:
             ref_sequence: List of key values defining output order

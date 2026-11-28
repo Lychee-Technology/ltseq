@@ -13,6 +13,7 @@ use datafusion::arrow::compute::CastOptions;
 use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::Column;
+use datafusion::functions::core::expr_fn::coalesce;
 use datafusion::logical_expr::{Expr, JoinType, SortExpr};
 use pyo3::prelude::*;
 use pyo3::types::PyAnyMethods;
@@ -139,13 +140,15 @@ fn build_ref_key_array(
 ///
 /// Creates a result table where:
 /// - Rows are reordered to match ref_sequence order
-/// - NULL rows inserted for keys not in the original table
+/// - A row is inserted for each reference key the table lacks: its key
+///   column holds that reference key, its other columns are NULL (#317)
 /// - Rows with keys not in ref_sequence are excluded
 ///
 /// Native plan: ref DataFrame (`__ref_key__`, `__pos__`) LEFT JOIN table
-/// ON `__ref_key__ = key_col`, ORDER BY `__pos__`, project the table columns.
-/// The two reference columns take other names when the table has columns of
-/// these (#346).
+/// ON `__ref_key__ = key_col`, the key computed as
+/// `COALESCE(key_col, __ref_key__)`, ORDER BY `__pos__`, project the table
+/// columns. The two reference columns take other names when the table has
+/// columns of these (#346).
 pub fn align_impl(
     py: Python<'_>,
     table: &LTSeqTable,
@@ -184,8 +187,16 @@ fn align_on_keys(
     // The join puts the reference columns next to the table's, so they take
     // names no column of the table has (#346).
     let [ref_key, pos] = free_names(["__ref_key__", "__pos__"], schema, &[]);
+    // The reference key has the key column's type (build_ref_key_array) and
+    // its metadata, so the COALESCE below neither coerces nor changes the
+    // field: the output key keeps the key column's type, metadata and the
+    // nullability the LEFT JOIN gave it before #317.
+    let key_metadata = schema
+        .field_with_name(key_col)
+        .map(|f| f.metadata().clone())
+        .unwrap_or_default();
     let ref_schema = Arc::new(ArrowSchema::new(vec![
-        Field::new(&ref_key, ref_key_array.data_type().clone(), true),
+        Field::new(&ref_key, ref_key_array.data_type().clone(), true).with_metadata(key_metadata),
         Field::new(&pos, DataType::UInt64, false),
     ]));
     let ref_batch = RecordBatch::try_new(ref_schema, vec![ref_key_array, pos_array])
@@ -196,12 +207,32 @@ fn align_on_keys(
         .read_batch(ref_batch)
         .map_err(|e| LtseqError::Runtime(format!("Failed to read ref batch: {}", e)))?;
 
-    // Native LEFT JOIN + ORDER BY __pos__ + project the table's columns.
-    let table_cols: Vec<Expr> = schema
+    // Native LEFT JOIN + key + ORDER BY __pos__ + project the table's columns.
+    // A reference key the table lacks leaves the table's key NULL in its
+    // row; the row's key is that reference key, so the key column is
+    // COALESCE(key_col, __ref_key__) (#317). A matched row's key is never
+    // NULL (NULL keys match nothing), so it keeps the table's own value,
+    // including a representation the join's equality does not tell apart
+    // from the reference's (-0.0 matched by 0.0).
+    //
+    // The key is computed below the sort, and the projection above it only
+    // picks columns: DataFusion round-robin repartitions the sorted rows for
+    // a projection that computes something, which loses their order when
+    // the partitions are collected.
+    let own = |name: &str| Expr::Column(Column::new_unqualified(name));
+    let filled_cols: Vec<Expr> = schema
         .fields()
         .iter()
-        .map(|f| Expr::Column(Column::new_unqualified(f.name())))
+        .map(|f| {
+            if f.name() == key_col {
+                coalesce(vec![own(f.name()), own(&ref_key)]).alias(f.name())
+            } else {
+                own(f.name())
+            }
+        })
+        .chain(std::iter::once(own(&pos)))
         .collect();
+    let table_cols: Vec<Expr> = schema.fields().iter().map(|f| own(f.name())).collect();
 
     // Plan building only; nothing executes here.
     let result_df = join_on_columns(
@@ -211,6 +242,7 @@ fn align_on_keys(
         &[ref_key.as_str()],
         &[key_col],
     )
+    .and_then(|d| d.select(filled_cols))
     .and_then(|d| d.sort(vec![SortExpr::new(column(&pos), true, false)]))
     .and_then(|d| d.select(table_cols))
     .map_err(|e| LtseqError::Runtime(format!("Align join failed: {}", e)))?;
