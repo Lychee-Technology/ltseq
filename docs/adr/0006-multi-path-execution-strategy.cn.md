@@ -1,7 +1,7 @@
 # ADR 0006: 有意为之的多路径（混合）执行策略
 
 - 状态：已采纳（Accepted）
-- 决策日期：早于本记录 · 记录日期：2026-07-26
+- 决策日期：早于本记录 · 记录日期：2026-07-26 · 修订：2026-11-28（专用序列路径与 DataFusion 原生路径共享表达式执行；[ADR 0020](0020-shared-expression-execution-for-sequence-operations.cn.md)，#188 上的 D3）
 
 [English](0006-multi-path-execution-strategy.md)
 
@@ -14,7 +14,7 @@ LTSeq 不是 DataFusion 的纯包装。有些操作能干净地映射到原生�
 维持**两条并存的执行策略**，按问题选择。这个混合是有意的，不是不一致。
 
 1. **DataFusion 原生优先（默认）**：原生逻辑计划与表达式，含原生窗口构建（`transpiler/window_native.rs`）。
-2. **专用序列路径**：自定义算法胜过通用规划的场景用专用 Rust 实现：线性扫描（`src/ops/linear_scan.rs`）、并行扫描（`src/ops/parallel_scan.rs`）、as-of join 匹配（`src/ops/asof_join.rs`）、连续行模式/漏斗匹配（`src/ops/pattern_match.rs`）。这些路径需要 collect 输入才能运行，因此属于 [ADR 0005](0005-no-materialization-rule.cn.md) 中已记录的 eager 边界。
+2. **专用序列路径**：自定义算法胜过通用规划的场景用专用 Rust 实现：线性扫描（`src/ops/linear_scan.rs`）、并行扫描（`src/ops/parallel_scan.rs`）、as-of join 匹配（`src/ops/asof_join.rs`）、连续行模式/漏斗匹配（`src/ops/pattern_match.rs`）。这些路径需要 collect 输入才能运行，因此属于 [ADR 0005](0005-no-materialization-rule.cn.md) 中已记录的 eager 边界。专用路径拥有的是算法，而不是表达式语义：它经共享 lowering 求值谓词，或拒绝并转到通用路径，不保留自己的表达式解释器（[ADR 0020](0020-shared-expression-execution-for-sequence-operations.cn.md)）。
 
 SQL 的使用只留下一处有意的残余：`filter_where`（`src/ops/aggregation.rs`）对**空表**调用 `session.sql()`，纯粹当 WHERE 子句解析器用，然后把解析出的原生表达式应用到惰性的 `DataFrame::filter()`。这是把解析器当库用的 helper，不是数据执行 fallback。
 

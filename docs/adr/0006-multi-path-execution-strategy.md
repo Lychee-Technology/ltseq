@@ -1,7 +1,7 @@
 # ADR 0006: Deliberate Multi-Path (Hybrid) Execution Strategy
 
 - Status: Accepted
-- Decision date: predates this record · Recorded: 2026-07-26
+- Decision date: predates this record · Recorded: 2026-07-26 · Amended: 2026-11-28 (specialized sequence paths share expression execution with the DataFusion-first path; [ADR 0020](0020-shared-expression-execution-for-sequence-operations.md), D3 on #188)
 
 [中文版](0006-multi-path-execution-strategy.cn.md)
 
@@ -14,7 +14,7 @@ LTSeq is not a pure wrapper around DataFusion. Some operations map cleanly onto 
 Maintain **two coexisting execution strategies**, chosen per problem. The hybrid is deliberate, not an inconsistency.
 
 1. **DataFusion-first (default)**: native logical plans and expressions, including native window construction (`transpiler/window_native.rs`).
-2. **Specialized sequence paths**: dedicated Rust implementations where custom algorithms beat generic planning: linear scans (`src/ops/linear_scan.rs`), parallel scans (`src/ops/parallel_scan.rs`), as-of join matching (`src/ops/asof_join.rs`), and consecutive-row pattern/funnel matching (`src/ops/pattern_match.rs`). These paths collect their inputs to run, so they are among the documented eager boundaries in [ADR 0005](0005-no-materialization-rule.md).
+2. **Specialized sequence paths**: dedicated Rust implementations where custom algorithms beat generic planning: linear scans (`src/ops/linear_scan.rs`), parallel scans (`src/ops/parallel_scan.rs`), as-of join matching (`src/ops/asof_join.rs`), and consecutive-row pattern/funnel matching (`src/ops/pattern_match.rs`). These paths collect their inputs to run, so they are among the documented eager boundaries in [ADR 0005](0005-no-materialization-rule.md). A specialized path owns its algorithm, not its expression semantics: it evaluates predicates through the shared lowering or declines to the general path, and it does not keep an expression interpreter of its own ([ADR 0020](0020-shared-expression-execution-for-sequence-operations.md)).
 
 One deliberate remnant of SQL usage exists: `filter_where` (`src/ops/aggregation.rs`) uses `session.sql()` against an **empty** table purely as a WHERE-clause parser, then applies the resulting native expression to the lazy `DataFrame::filter()`. It is a parser-as-library helper, not a data-execution fallback.
 
