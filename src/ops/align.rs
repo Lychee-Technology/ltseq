@@ -12,6 +12,7 @@ use datafusion::arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray, 
 use datafusion::arrow::compute::CastOptions;
 use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::common::metadata::FieldMetadata;
 use datafusion::common::Column;
 use datafusion::functions::core::expr_fn::coalesce;
 use datafusion::logical_expr::{Expr, JoinType, SortExpr};
@@ -188,9 +189,9 @@ fn align_on_keys(
     // names no column of the table has (#346).
     let [ref_key, pos] = free_names(["__ref_key__", "__pos__"], schema, &[]);
     // The reference key has the key column's type (build_ref_key_array) and
-    // its metadata, so the COALESCE below neither coerces nor changes the
-    // field: the output key keeps the key column's type, metadata and the
-    // nullability the LEFT JOIN gave it before #317.
+    // its metadata, so the COALESCE below does not coerce. The output key
+    // keeps the key column's type and the nullability the LEFT JOIN gave it
+    // before #317; its metadata is set on the key's alias below.
     let key_metadata = schema
         .field_with_name(key_col)
         .map(|f| f.metadata().clone())
@@ -225,7 +226,14 @@ fn align_on_keys(
         .iter()
         .map(|f| {
             if f.name() == key_col {
-                coalesce(vec![own(f.name()), own(&ref_key)]).alias(f.name())
+                // DataFusion rewrites the COALESCE as a CASE, whose field
+                // carries no metadata, so the alias restores the key
+                // column's own (an extension type such as arrow.json lives
+                // there).
+                let metadata = (!f.metadata().is_empty())
+                    .then(|| FieldMetadata::from(f.metadata()));
+                coalesce(vec![own(f.name()), own(&ref_key)])
+                    .alias_with_metadata(f.name(), metadata)
             } else {
                 own(f.name())
             }

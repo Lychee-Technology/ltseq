@@ -1165,9 +1165,12 @@ impl LTSeqTable {
 
     /// Align table rows to a reference sequence
     ///
-    /// Reorders rows to match the order of ref_sequence and inserts NULL rows
-    /// for keys in ref_sequence that don't exist in the table. Rows with keys
-    /// not in ref_sequence are excluded from the result.
+    /// Reorders rows to follow ref_sequence. For each key in ref_sequence
+    /// that the table lacks, inserts a row whose key column holds that
+    /// reference key, in the key column's type, and whose other columns are
+    /// NULL (#317). Rows with keys not in ref_sequence are excluded; a key
+    /// the table holds several times yields all of its rows at that
+    /// position, in no specified order. The result declares no sort order.
     ///
     /// # Arguments
     ///
@@ -1176,14 +1179,19 @@ impl LTSeqTable {
     ///
     /// # Returns
     ///
-    /// A new LTSeqTable with rows reordered and NULL rows for missing keys
+    /// A new LTSeqTable with the table's columns, names, types and field
+    /// metadata, every column nullable, one or more rows per reference
+    /// position
     ///
     /// # Algorithm
     ///
-    /// Uses SQL LEFT JOIN approach:
-    /// 1. Create temp table from ref_sequence with position column
-    /// 2. LEFT JOIN original table ON key
-    /// 3. ORDER BY position
+    /// A lazy native DataFusion plan, with no SQL text and no
+    /// materialization:
+    /// 1. An in-memory reference batch of the typed reference keys and
+    ///    their positions
+    /// 2. LEFT JOIN the table ON key
+    /// 3. Project the key as COALESCE(key, reference key)
+    /// 4. ORDER BY position, then project the table's columns
     fn align(
         &self,
         py: Python<'_>,

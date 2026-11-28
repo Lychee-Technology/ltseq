@@ -47,22 +47,23 @@ class TestAlignBasic:
         assert str(df.iloc[0]["date"]) == "2024-01-04"
         assert str(df.iloc[1]["date"]) == "2024-01-02"
 
-    def test_align_inserts_null_rows(self, sample_csv):
-        """Test that align inserts NULL rows for missing keys."""
+    def test_align_inserts_null_payload_rows(self, sample_csv):
+        """Test that align inserts a row with NULL payload for each missing
+        key (its key holds the reference key, #317)."""
         t = LTSeq.read_csv(sample_csv)
         ref = ["2024-01-01", "2024-01-02", "2024-01-03"]
         result = t.align(ref, key=lambda r: r.date)
 
         df = result.to_pandas()
         assert len(df) == 3
-        # First row: 2024-01-01 not in original -> NULL
+        # First row: 2024-01-01 not in original -> NULL payload
         assert df.iloc[0]["value"] is None or (
             hasattr(df.iloc[0]["value"], "__float__")
             and str(df.iloc[0]["value"]) == "nan"
         )
         # Second row: 2024-01-02 exists
         assert df.iloc[1]["value"] == 100
-        # Third row: 2024-01-03 not in original -> NULL
+        # Third row: 2024-01-03 not in original -> NULL payload
         assert df.iloc[2]["value"] is None or (
             hasattr(df.iloc[2]["value"], "__float__")
             and str(df.iloc[2]["value"]) == "nan"
@@ -123,7 +124,7 @@ class TestAlignIntKeys:
 
         df = result.to_pandas()
         assert len(df) == 4
-        # id=1 and id=3 should be NULL
+        # id=1 and id=3 are not in the table: their payloads are NULL
         import pandas as pd
 
         assert pd.isna(df.iloc[0]["value"])
@@ -484,6 +485,37 @@ class TestAlignFillsInsertedKeys:
             {"a": "x", "k": 1, "z": 1.5},
         ]
 
+    def test_key_field_keeps_its_metadata(self, engine_layout):
+        """The key field keeps the key column's metadata through the plan
+        and the Arrow export, as the other fields keep theirs; an extension
+        type held there survives. DataFusion plans the filled key as a
+        CASE, whose field has no metadata of its own."""
+        import pyarrow as pa
+
+        key = pa.field("k", pa.int64(), metadata={"units": "minutes"})
+        val = pa.field("v", pa.float64(), metadata={"units": "celsius"})
+        t = LTSeq.from_arrow(
+            pa.Table.from_arrays(
+                [pa.array([3, 0, 1]), pa.array([4.0, 1.0, 2.0])],
+                schema=pa.schema([key, val]),
+            )
+        )
+        out = t.align([0, 1, 2, 3], key=lambda r: r.k).to_arrow()
+        assert out.schema.field("k").type == pa.int64()
+        assert out.schema.field("k").metadata == {b"units": b"minutes"}
+        assert out.schema.field("v").metadata == {b"units": b"celsius"}
+        assert out.column("k").to_pylist() == [0, 1, 2, 3]
+        assert out.column("v").to_pylist() == [1.0, 2.0, None, 4.0]
+
+        storage = pa.array(['"a"', '"c"'], pa.string())
+        js = LTSeq.from_arrow(
+            pa.table({"k": pa.ExtensionArray.from_storage(pa.json_(), storage), "v": [1, 3]})
+        )
+        out = js.align(['"c"', '"b"', '"a"'], key=lambda r: r.k).to_arrow()
+        assert out.schema.field("k").type == pa.json_()
+        assert out.column("k").combine_chunks().storage.to_pylist() == ['"c"', '"b"', '"a"']
+        assert out.column("v").to_pylist() == [3, None, 1]
+
     def test_plan_stays_lazy_and_native(self):
         t = LTSeq.from_rows([{"k": 0, "v": 1}, {"k": 2, "v": 3}])
         info = t.align([0, 1, 2], key=lambda r: r.k)._explain_pipeline()
@@ -528,8 +560,9 @@ class TestAlignFillsInsertedKeys:
 
 
 class TestAlignInsertedKeyTypes:
-    """The inserted key has the key column's exact Arrow type for every
-    supported key type (#317 AC7); no type is added."""
+    """The inserted key has the key column's exact Arrow type, checked on
+    representative types and units of each supported family (#317 AC7); no
+    type is added."""
 
     @staticmethod
     def _check(arrow_type, present, missing, ref=None):
