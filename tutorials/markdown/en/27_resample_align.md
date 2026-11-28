@@ -11,8 +11,9 @@
 - **Resample** irregular timestamps onto a fixed grid: `dt.diff(anchor, unit)`
   + `//` floor = time bucketing
 - **Align** the aggregated result to a full calendar — missing ticks appear
-  as explicit NULL rows: `align()` inserts them, a left join from an axis
-  table inserts them and keeps their keys
+  as explicit rows that keep their key and hold NULL elsewhere: `align()`
+  inserts them from a list, a left join from an axis table inserts them from
+  a table
 - **Forward-fill** the gaps with `fold` so downstream computation gets a
   continuous series
 
@@ -130,8 +131,9 @@ per_min.show()
 ## Step 2 · Calendar alignment: align() materializes missing rows
 
 `align(ref_sequence, key=)` reorders the table along a reference sequence,
-auto-inserting NULL rows for keys **present in the reference but not the
-table** — on the 0-4 axis, the missing minute gets a row of its own.
+auto-inserting a row for each key **present in the reference but not the
+table** — on the 0-4 axis, the missing minute gets a row of its own, keyed by
+that minute.
 
 ```python
 aligned = per_min.align([0, 1, 2, 3, 4], key=lambda r: r.minute)
@@ -147,7 +149,7 @@ aligned.show()
 > +--------+----------+----------+------+
 > | 0      | 20.5     | 20.5     | 1    |
 > | 1      | 21       | 21       | 1    |
-> | None   | None     | None     | None |
+> | 2      | None     | None     | None |
 > | 3      | 19.5     | 19.5     | 1    |
 > | 4      | 20       | 20       | 1    |
 > +--------+----------+----------+------+
@@ -155,17 +157,18 @@ aligned.show()
 
 **Notes**
 
-- The missing minute is now a row, third in reference order — but **every**
-  column of it is NULL, the key `minute` included: `align` fills the row
-  from the table, and the table has nothing for minute 2. Only the row's
-  position says which minute it is.
+- The missing minute is now a row, third in reference order. Its key
+  `minute` is 2, the reference value it was inserted for; every other column
+  is NULL, because the table has nothing for minute 2.
 - `align` is one of LTSeq's few "**sequence-first**" operators: row order
-  obeys the reference, and reference keys missing from the table become NULL
-  rows.
-- The keyless row gets in the way downstream: `align` drops the declared
-  sort order, and `sort("minute")` would move the NULL key to the end. To
-  keep computing on the series, build the axis as a table and left-join the
-  data onto it.
+  obeys the reference, and reference keys missing from the table become rows
+  of their own.
+- `align` declares no sort order, even for an ascending reference: it cannot
+  know the list is sorted. Before an order-dependent step such as Step 3's
+  `fold`, call `sort("minute")`; minute 2 sorts back into place because its
+  row keeps the key.
+- `align` is removed in v0.5. What replaces it builds the axis as a table
+  and left-joins the data onto it, which is what the rest of this case uses.
 
 ```python
 axis = LTSeq.from_rows([{"minute": m} for m in range(5)])
@@ -191,11 +194,14 @@ grid.show()
 
 **Notes**
 
-- Same five rows, but minute 2 keeps its key: the axis table supplies it,
+- The same five rows `align` gave: the axis table supplies minute 2's key,
   and `how="left"` keeps every axis row whether or not `per_min` has a
   match. The left join drops `per_min`'s copy of the key column.
 - A join returns rows in no particular order, so `sort("minute")` restores
   time order and declares it — Step 3's `fold` requires a declared order.
+  Here the axis runs in key order; an axis in any other order needs a
+  position column in the axis table to sort by, since the join does not keep
+  the axis table's row order.
 - The full grid plots directly (line-chart holes are visible), diffs safely
   (a gap yields a NULL diff, no fake trend), and feeds packet-loss statistics
   by counting NULLs — **the axis pays off at every downstream step**.
@@ -250,8 +256,9 @@ filled.show()
 - **The axis is the ordered world's coordinate system**: declaring what the
   full axis looks like turns missing from "nonexistent" into "explicit
   NULL" — packet-loss monitoring, calendar reports, experiment alignment all
-  lean on it. `align()` declares it with a Python list but loses the key on
-  the rows it inserts; an axis table keeps it.
+  lean on it. `align()` declares it with a Python list; an axis table
+  declares it as data, and is the form that remains when v0.5 removes
+  `align()`.
 - **ffill belongs to fold, second proof**: stateful carry ("remember the
   last valid value") lives outside window expressions; one fold line does
   it.

@@ -275,8 +275,30 @@ class AdvancedOpsMixin(LTSeqLike):
         """
         Align table rows to a reference sequence.
 
-        Reorders rows to match ref_sequence order and inserts NULL rows
-        for missing keys.
+        Reorders rows to match ref_sequence order. For each reference key
+        the table lacks, inserts a row whose key column holds that
+        reference key and whose other columns are NULL. Rows whose key is
+        not in ref_sequence are dropped; a key the table holds several
+        times yields all of its rows at that reference position, in no
+        specified order.
+
+        The result declares no sort order, even when ref_sequence ascends:
+        call ``sort()`` before an operation that needs one.
+
+        ``align`` is removed in v0.5 (§13.2). The migration pattern is a
+        LEFT JOIN from an axis table holding the reference keys, followed by
+        a ``sort``. ``LTSeq.from_dict({"k": ref_sequence}).join(t, on="k",
+        how="left")`` builds the axis by type inference, which suits
+        references of plain ints, floats or strings matching an int64,
+        float64 or string key. Where inference is unsuitable, build the axis
+        with the key column's type, as in ``LTSeq.from_arrow(pa.table({"k":
+        pa.array(ref_sequence, pa.uint64())}))``: ``from_dict`` raises
+        ``OverflowError`` on a uint64 value above ``2**63 - 1``, and ISO
+        date strings stay strings, where ``align`` parses them into the date
+        column's type. The join's key column is the axis table's, so its
+        type is the one the axis was built with. A join keeps no row order:
+        sort by the key when the reference ascends, and otherwise add a
+        position column to the axis table and sort by it.
 
         Args:
             ref_sequence: List of key values defining output order
